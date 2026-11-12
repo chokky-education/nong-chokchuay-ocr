@@ -72,6 +72,48 @@ def _render_document_images(
     return [img], 1
 
 
+def apply_intelligence_to_document(
+    doc_id: str,
+    current_category: str,
+    current_tags: List[str],
+    intel: Dict[str, Any],
+    db_path: Optional[str] = None,
+    *,
+    force_expense: bool = False,
+) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Merge suggested metadata onto default fields and persist an Expense Record when applicable."""
+    suggested_cat = intel.get("doc_category") or "general"
+    suggested_tags = intel.get("tags") or []
+    updated_doc = None
+    if (current_category == "general" and suggested_cat != "general") or (
+        not current_tags and suggested_tags
+    ):
+        updated_doc = database.update_document_metadata(
+            doc_id,
+            category=suggested_cat if current_category == "general" else current_category,
+            tags=suggested_tags if not current_tags else current_tags,
+            db_path=db_path,
+        )
+
+    expense_record = None
+    if (force_expense or intel.get("is_expense")) and intel.get("expense"):
+        exp = intel["expense"]
+        expense_record = database.upsert_expense(
+            document_id=doc_id,
+            merchant=exp["merchant"],
+            expense_date=exp["expense_date"],
+            subtotal=exp["subtotal"],
+            vat_amount=exp["vat_amount"],
+            total_amount=exp["total_amount"],
+            currency=exp["currency"],
+            expense_category=exp["expense_category"],
+            extraction_method=exp["extraction_method"],
+            raw_json=intel,
+            db_path=db_path,
+        )
+    return updated_doc, expense_record
+
+
 def ingest_document(
     contents: bytes,
     filename: str,
@@ -181,46 +223,29 @@ def ingest_document(
                 image_height=orig_h,
                 db_path=config.db_path,
             )
-            if should_auto_extract and full_text:
-                intel = extractor.extract_document_intelligence(
-                    full_text, config, mode="auto", require_expense_hint=True
-                )
-                suggested_cat = intel.get("doc_category") or "general"
-                suggested_tags = intel.get("tags") or []
-                if (clean_category == "general" and suggested_cat != "general") or (
-                    not clean_tags and suggested_tags
-                ):
-                    new_cat = suggested_cat if clean_category == "general" else clean_category
-                    new_tags = suggested_tags if not clean_tags else clean_tags
-                    updated = database.update_document_metadata(
-                        doc_id,
-                        category=new_cat,
-                        tags=new_tags,
-                        db_path=config.db_path,
-                    )
-                    if updated:
-                        clean_category = updated["category"]
-                        clean_tags = updated["tags"]
-
-                if intel.get("is_expense") and intel.get("expense"):
-                    exp = intel["expense"]
-                    expense_record = database.upsert_expense(
-                        document_id=doc_id,
-                        merchant=exp["merchant"],
-                        expense_date=exp["expense_date"],
-                        subtotal=exp["subtotal"],
-                        vat_amount=exp["vat_amount"],
-                        total_amount=exp["total_amount"],
-                        currency=exp["currency"],
-                        expense_category=exp["expense_category"],
-                        extraction_method=exp["extraction_method"],
-                        raw_json=intel,
-                        db_path=config.db_path,
-                    )
         except Exception:
             if source_path and os.path.exists(source_path):
                 os.remove(source_path)
             raise
+
+        if should_auto_extract and full_text:
+            try:
+                intel = extractor.extract_document_intelligence(
+                    full_text, config, extraction_method="auto", require_expense_hint=True
+                )
+                updated_doc, expense_record = apply_intelligence_to_document(
+                    doc_id,
+                    clean_category,
+                    clean_tags,
+                    intel,
+                    db_path=config.db_path,
+                    force_expense=False,
+                )
+                if updated_doc:
+                    clean_category = updated_doc["category"]
+                    clean_tags = updated_doc["tags"]
+            except Exception as exc:
+                print(f"[OCR] Auto-extract skipped for {doc_id}: {exc}")
 
     return {
         "success": True,
@@ -240,6 +265,7 @@ def ingest_document(
         "tags": clean_tags,
         "ingestion_channel": ingestion_channel,
         "doc_date": doc_date,
+        "auto_extract": bool(should_auto_extract),
         "expense": expense_record,
         "stats": {
             "duration_ms": total_duration_ms,

@@ -96,8 +96,9 @@ def create_app(
             "model_size": "~4.2 MB",
             "hardware": "CPU (ONNX Runtime / OpenVINO)",
             "offline": True,
-            "llm_configured": bool(cfg.llm_api_key),
-            "llm_provider": cfg.llm_provider if cfg.llm_api_key else None,
+            "auto_extract_on_ingest": cfg.auto_extract_on_ingest,
+            "llm_configured": extractor.is_llm_configured(cfg),
+            "llm_provider": cfg.llm_provider if extractor.is_llm_configured(cfg) else None,
             "license": "Apache-2.0",
             "database": {
                 "type": "SQLite with Trigram Full-Text Search (FTS5)",
@@ -216,7 +217,7 @@ def create_app(
 
     # Expense Extraction & Reporting Endpoints
     @application.post("/api/documents/{doc_id}/extract")
-    def extract_document_expense(doc_id: str, mode: str = Query("auto")):
+    def extract_document_expense(doc_id: str, extraction_method: str = Query("auto")):
         doc = database.get_document_by_id(doc_id, db_path=cfg.db_path)
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
@@ -224,36 +225,16 @@ def create_app(
         intel = extractor.extract_document_intelligence(
             doc.get("text") or "",
             cfg,
-            mode=mode,
+            extraction_method=extraction_method,
             require_expense_hint=False,
         )
-        extracted = intel.get("expense") or extractor.extract_expense_regex(doc.get("text") or "")
-
-        suggested_cat = intel.get("doc_category") or "general"
-        suggested_tags = intel.get("tags") or []
-        updated_doc = None
-        if ((doc.get("category") or "general") == "general" and suggested_cat != "general") or (
-            not doc.get("tags") and suggested_tags
-        ):
-            updated_doc = database.update_document_metadata(
-                doc_id,
-                category=suggested_cat if (doc.get("category") or "general") == "general" else doc.get("category"),
-                tags=suggested_tags if not doc.get("tags") else doc.get("tags"),
-                db_path=cfg.db_path,
-            )
-
-        expense = database.upsert_expense(
-            document_id=doc_id,
-            merchant=extracted["merchant"],
-            expense_date=extracted["expense_date"],
-            subtotal=extracted["subtotal"],
-            vat_amount=extracted["vat_amount"],
-            total_amount=extracted["total_amount"],
-            currency=extracted["currency"],
-            expense_category=extracted["expense_category"],
-            extraction_method=extracted["extraction_method"],
-            raw_json=intel,
+        updated_doc, expense = ocr_service.apply_intelligence_to_document(
+            doc_id,
+            doc.get("category") or "general",
+            doc.get("tags") or [],
+            intel,
             db_path=cfg.db_path,
+            force_expense=True,
         )
         return {"success": True, "expense": expense, "document": updated_doc}
 

@@ -451,53 +451,48 @@ def search_documents(
 
 def get_document_by_id(doc_id: str, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
     conn = get_db_connection(db_path)
-    cursor = conn.cursor()
-    row = cursor.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
-    conn.close()
-    if not row:
-        return None
-
-    lines = []
-    if row["lines_json"]:
-        try:
-            lines = json.loads(row["lines_json"])
-        except Exception:
-            lines = []
-
-    src_path = row["source_path"] or ""
-    expense_row = None
     try:
-        conn2 = get_db_connection(db_path)
-        exp = conn2.execute("SELECT * FROM expenses WHERE document_id = ?", (doc_id,)).fetchone()
-        conn2.close()
-        if exp:
-            expense_row = _format_expense_row(exp)
-    except Exception:
-        expense_row = None
+        cursor = conn.cursor()
+        row = cursor.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+        if not row:
+            return None
 
-    return {
-        "id": row["id"],
-        "filename": row["filename"],
-        "file_type": row["file_type"],
-        "file_size": row["file_size"],
-        "total_pages": row["total_pages"],
-        "text": row["text_content"],
-        "lines": lines,
-        "avg_confidence": row["avg_confidence"],
-        "duration_ms": row["duration_ms"],
-        "image_preview": row["image_preview"],
-        "source_path": src_path,
-        "has_source_file": bool(src_path and os.path.exists(src_path)),
-        "category": row["category"] or "general",
-        "tags": _parse_tags_json(row["tags_json"]),
-        "ingestion_channel": row["ingestion_channel"] or "web_upload",
-        "doc_date": row["doc_date"] or "",
-        "image_width": row["image_width"] or 0,
-        "image_height": row["image_height"] or 0,
-        "expense": expense_row,
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-    }
+        lines = []
+        if row["lines_json"]:
+            try:
+                lines = json.loads(row["lines_json"])
+            except Exception:
+                lines = []
+
+        src_path = row["source_path"] or ""
+        exp = cursor.execute("SELECT * FROM expenses WHERE document_id = ?", (doc_id,)).fetchone()
+        expense_row = _format_expense_row(exp) if exp else None
+
+        return {
+            "id": row["id"],
+            "filename": row["filename"],
+            "file_type": row["file_type"],
+            "file_size": row["file_size"],
+            "total_pages": row["total_pages"],
+            "text": row["text_content"],
+            "lines": lines,
+            "avg_confidence": row["avg_confidence"],
+            "duration_ms": row["duration_ms"],
+            "image_preview": row["image_preview"],
+            "source_path": src_path,
+            "has_source_file": bool(src_path and os.path.exists(src_path)),
+            "category": row["category"] or "general",
+            "tags": _parse_tags_json(row["tags_json"]),
+            "ingestion_channel": row["ingestion_channel"] or "web_upload",
+            "doc_date": row["doc_date"] or "",
+            "image_width": row["image_width"] or 0,
+            "image_height": row["image_height"] or 0,
+            "expense": expense_row,
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+    finally:
+        conn.close()
 
 
 def _format_expense_row(row: sqlite3.Row, filename: Optional[str] = None) -> Dict[str, Any]:

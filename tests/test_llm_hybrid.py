@@ -121,6 +121,53 @@ class LlmHybridAdapterTest(unittest.TestCase):
                 expenses = client.get("/api/expenses").json()["expenses"]
                 self.assertEqual(expenses, [])
 
+    def test_keyless_local_ollama_base_url_works_without_api_key(self) -> None:
+        llm_json = {
+            "is_expense": True,
+            "doc_category": "receipt",
+            "tags": ["ollama"],
+            "merchant": "Local Cafe",
+            "expense_date": "2026-11-12",
+            "subtotal": 50.0,
+            "vat_amount": 0.0,
+            "total_amount": 50.0,
+            "currency": "THB",
+            "expense_category": "food",
+        }
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {
+            "choices": [{"message": {"content": json.dumps(llm_json)}}]
+        }
+
+        with make_temp_data_dir() as tmpdir:
+            cfg = AppConfig.from_dir(
+                tmpdir,
+                inbox_poll_seconds=0,
+                llm_provider="openai",
+                llm_api_key="",
+                llm_model="qwen2.5:7b",
+                llm_base_url="http://127.0.0.1:11434/v1",
+            )
+            test_app = create_app(
+                config=cfg,
+                engine_factory=lambda: FakeLineOCR(text="Local Cafe\n50.00 บาท"),
+            )
+            with patch("extractor.requests.post", return_value=mock_resp) as mock_post:
+                with TestClient(test_app) as client:
+                    sys_resp = client.get("/api/system")
+                    self.assertTrue(sys_resp.json()["llm_configured"])
+                    up = client.post(
+                        "/api/ocr",
+                        files={"file": ("cafe.png", make_png_bytes(300, 300), "image/png")},
+                        data={"auto_extract": "true"},
+                    )
+                    self.assertEqual(up.status_code, 200)
+                    self.assertEqual(up.json()["expense"]["extraction_method"], "llm")
+                    self.assertEqual(up.json()["expense"]["merchant"], "Local Cafe")
+                self.assertEqual(mock_post.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

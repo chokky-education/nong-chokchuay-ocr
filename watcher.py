@@ -19,11 +19,9 @@ class InboxWatcher:
         self,
         config: AppConfig,
         engine_getter: Callable[[], Any],
-        on_ingested: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
         self.config = config
         self.engine_getter = engine_getter
-        self.on_ingested = on_ingested
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -99,8 +97,6 @@ class InboxWatcher:
                         save_to_db=True,
                         ingestion_channel="watch_folder",
                     )
-                    if self.on_ingested is not None and res.get("doc_id"):
-                        self.on_ingested(res)
                     os.remove(full_path)
                     if res.get("doc_id"):
                         processed_ids.append(res["doc_id"])

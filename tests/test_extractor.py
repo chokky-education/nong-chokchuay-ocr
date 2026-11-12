@@ -42,6 +42,31 @@ class ExtractorAndExpenseDashboardTest(unittest.TestCase):
         self.assertAlmostEqual(slip_res["total_amount"], 85.5, places=2)
         self.assertIn("ร้านข้าวมันไก่เจ๊นก", slip_res["merchant"])
 
+        before_vat_text = (
+            "ใบเสร็จรับเงิน\n"
+            "ร้านทดสอบ\n"
+            "อ้างอิง 99-99-2569 วันที่ 12/11/2569\n"
+            "Before VAT 100.00\n"
+            "VAT 7% 7.00\n"
+            "Total 107.00"
+        )
+        bv_res = extract_expense_regex(before_vat_text)
+        self.assertEqual(bv_res["expense_date"], "2026-11-12")
+        self.assertAlmostEqual(bv_res["subtotal"], 100.0, places=2)
+        self.assertAlmostEqual(bv_res["vat_amount"], 7.0, places=2)
+        self.assertAlmostEqual(bv_res["total_amount"], 107.0, places=2)
+
+        no_vat_amt_text = (
+            "ใบเสร็จรับเงิน\n"
+            "ร้านกาแฟทดสอบ\n"
+            "Total 2 items\n"
+            "VAT 7% included\n"
+            "ยอดสุทธิ 150.00 บาท"
+        )
+        nv_res = extract_expense_regex(no_vat_amt_text)
+        self.assertAlmostEqual(nv_res["vat_amount"], 0.0, places=2)
+        self.assertAlmostEqual(nv_res["total_amount"], 150.0, places=2)
+
     def test_expense_endpoints_crud_monthly_summary_csv_and_cascade_delete(self) -> None:
         receipt_ocr_text = (
             "ใบเสร็จรับเงิน\n"

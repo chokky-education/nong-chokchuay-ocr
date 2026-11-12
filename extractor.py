@@ -1,6 +1,7 @@
 import json
 import re
-from typing import Any, Dict, List, Optional
+from datetime import datetime
+from typing import Any, Dict, List
 
 import requests
 
@@ -37,44 +38,52 @@ _EXPENSE_CATEGORY_KEYWORDS = {
 }
 
 
+def is_llm_configured(config: AppConfig) -> bool:
+    """Return True when a cloud LLM API key or local OpenAI-compatible URL is configured."""
+    return bool(config.llm_api_key or (config.llm_provider != "gemini" and config.llm_base_url))
+
+
 def _normalize_year(raw_year: int) -> int:
     if raw_year < 100:
-        # Assume Thai 2-digit BE year when >= 40 (e.g. 69 -> 2569 -> 2026)
         raw_year = (2500 + raw_year) if raw_year >= 40 else (2000 + raw_year)
     if raw_year >= 2400:
         return raw_year - 543
     return raw_year
 
 
+def _valid_iso_date(year: int, month: int, day: int) -> str:
+    if not (1990 <= year <= 2100):
+        return ""
+    try:
+        datetime(year, month, day)
+        return f"{year:04d}-{month:02d}-{day:02d}"
+    except ValueError:
+        return ""
+
+
 def _extract_date(text: str) -> str:
-    # 1. Thai day + month name + year (e.g., 12 พ.ย. 2569 or 12 พ.ย. 69)
     month_keys = "|".join(sorted((re.escape(k) for k in THAI_MONTHS), key=len, reverse=True))
     thai_date_re = re.compile(rf"(\d{{1,2}})\s*({month_keys})\s*(\d{{2,4}})")
-    m = thai_date_re.search(text)
-    if m:
-        day = int(m.group(1))
-        month = THAI_MONTHS.get(m.group(2), 0)
-        year = _normalize_year(int(m.group(3)))
-        if 1 <= month <= 12 and 1 <= day <= 31 and 1990 <= year <= 2100:
-            return f"{year:04d}-{month:02d}-{day:02d}"
+    for m in thai_date_re.finditer(text):
+        iso = _valid_iso_date(
+            _normalize_year(int(m.group(3))),
+            THAI_MONTHS.get(m.group(2), 0),
+            int(m.group(1)),
+        )
+        if iso:
+            return iso
 
-    # 2. ISO YYYY-MM-DD (handles BE year like 2569-11-12 too)
     iso_re = re.compile(r"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b")
-    m = iso_re.search(text)
-    if m:
-        year = _normalize_year(int(m.group(1)))
-        month, day = int(m.group(2)), int(m.group(3))
-        if 1 <= month <= 12 and 1 <= day <= 31 and 1990 <= year <= 2100:
-            return f"{year:04d}-{month:02d}-{day:02d}"
+    for m in iso_re.finditer(text):
+        iso = _valid_iso_date(_normalize_year(int(m.group(1))), int(m.group(2)), int(m.group(3)))
+        if iso:
+            return iso
 
-    # 3. DD/MM/YYYY or DD-MM-YYYY
     dmy_re = re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b")
-    m = dmy_re.search(text)
-    if m:
-        day, month = int(m.group(1)), int(m.group(2))
-        year = _normalize_year(int(m.group(3)))
-        if 1 <= month <= 12 and 1 <= day <= 31 and 1990 <= year <= 2100:
-            return f"{year:04d}-{month:02d}-{day:02d}"
+    for m in dmy_re.finditer(text):
+        iso = _valid_iso_date(_normalize_year(int(m.group(3))), int(m.group(2)), int(m.group(1)))
+        if iso:
+            return iso
 
     return ""
 
@@ -98,7 +107,6 @@ def _extract_amount_for_patterns(lines: List[str], patterns: List[re.Pattern[str
 
 
 def _infer_merchant(lines: List[str]) -> str:
-    # PromptPay / Bank transfer recipient patterns
     recipient_re = re.compile(r"(?:ไปยัง|ผู้รับ|ชื่อบัญชี|ร้านค้า)[:\s]+(.+)")
     for line in lines:
         m = recipient_re.search(line)
@@ -150,15 +158,15 @@ def is_likely_expense(text: str) -> bool:
 def extract_expense_regex(text: str) -> Dict[str, Any]:
     """Extract structured Expense Record fields purely offline using Thai/English regexes."""
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
-    amt_token = r"(?:thb|฿)?\s*([\d,]+\.\d{2}|[\d,]+)\s*(?:บาท|thb|฿)?"
+    amt_token = r"(?:thb|฿)?\s*([\d,]+\.\d{2}|[\d,]+(?!\s*%)(?!\s*(?:items?|ชิ้น|รายการ|pcs|ea)\b))\s*(?:บาท|thb|฿)?"
 
     total_patterns = [
         re.compile(rf"(?:ยอดสุทธิ|รวมทั้งสิ้น|ยอดรวมสุทธิ|รวมเงินทั้งสิ้น|grand\s*total|net\s*total)[:\s]*{amt_token}", re.IGNORECASE),
         re.compile(rf"(?:จำนวนเงิน|ยอดชำระ|ชำระเงิน|total\s*amount)[:\s]*{amt_token}", re.IGNORECASE),
-        re.compile(rf"\b(?:total)\b[:\s]*{amt_token}", re.IGNORECASE),
+        re.compile(rf"(?<!sub\s)(?<!sub-)\b(?:total)\b[:\s]*{amt_token}", re.IGNORECASE),
     ]
     vat_patterns = [
-        re.compile(rf"(?:ภาษีมูลค่าเพิ่ม|vat)\s*(?:\d+(?:\.\d+)?\s*%)?[:\s]+{amt_token}", re.IGNORECASE),
+        re.compile(rf"(?<!before\s)(?<!pre-)(?:ภาษีมูลค่าเพิ่ม|\bvat\b)\s*(?:\d+(?:\.\d+)?\s*%)?[:\s]+{amt_token}", re.IGNORECASE),
     ]
     subtotal_patterns = [
         re.compile(rf"(?:รวมเป็นเงิน|ยอดก่อนภาษี|มูลค่าสินค้า|before\s*vat|sub\s*total|subtotal)[:\s]*{amt_token}", re.IGNORECASE),
@@ -218,9 +226,9 @@ _LLM_SYSTEM_PROMPT = (
 
 
 def extract_with_llm(text: str, config: AppConfig) -> Dict[str, Any]:
-    """Call optional text-only LLM API (Gemini or OpenAI-compatible) using OCR text only."""
-    if not config.llm_api_key:
-        raise ValueError("LLM API key is not configured")
+    """Call optional text-only LLM API (Gemini or OpenAI-compatible/Ollama) using OCR text only."""
+    if not is_llm_configured(config):
+        raise ValueError("LLM endpoint is not configured")
 
     prompt_text = f"{_LLM_SYSTEM_PROMPT}\n\nOCR_TEXT:\n{text[:8000]}"
     provider = (config.llm_provider or "gemini").lower()
@@ -247,12 +255,12 @@ def extract_with_llm(text: str, config: AppConfig) -> Dict[str, Any]:
     else:
         base = (config.llm_base_url or "https://api.openai.com/v1").rstrip("/")
         url = f"{base}/chat/completions"
+        headers = {"Content-Type": "application/json"}
+        if config.llm_api_key:
+            headers["Authorization"] = f"Bearer {config.llm_api_key}"
         resp = requests.post(
             url,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {config.llm_api_key}",
-            },
+            headers=headers,
             json={
                 "model": config.llm_model or "gpt-4o-mini",
                 "temperature": 0.1,
@@ -300,12 +308,12 @@ def extract_document_intelligence(
     text: str,
     config: AppConfig,
     *,
-    mode: str = "auto",
+    extraction_method: str = "auto",
     require_expense_hint: bool = False,
 ) -> Dict[str, Any]:
     """Run hybrid extraction (text-only LLM when configured, offline Thai Regex fallback)."""
-    clean_mode = (mode or "auto").strip().lower()
-    if clean_mode in ("auto", "llm") and config.llm_api_key:
+    clean_method = (extraction_method or "auto").strip().lower()
+    if clean_method in ("auto", "llm") and is_llm_configured(config):
         try:
             return extract_with_llm(text, config)
         except Exception as exc:

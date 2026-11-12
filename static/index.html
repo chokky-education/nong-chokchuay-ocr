@@ -36,6 +36,9 @@
         <span class="badge-dot"></span>
         <span>Local CPU Engine</span>
       </div>
+      <div id="llm-status-badge" class="badge" title="สถานะโหมดสกัดข้อมูลรายจ่าย (Offline Regex หรือ Hybrid Text LLM)">
+        <span>⚙️ Offline Regex</span>
+      </div>
       <div class="badge">
         <span>💾 SQLite (FTS5)</span>
       </div>
@@ -104,10 +107,16 @@
 
       <!-- Viewer Controls -->
       <div class="viewer-controls-bar">
-        <label style="display: flex; align-items: center; gap: 0.35rem; cursor: pointer;">
-          <input type="checkbox" id="toggle-boxes" checked>
-          <span>แสดงกรอบข้อความ (Bounding Boxes)</span>
-        </label>
+        <div style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">
+          <label style="display: flex; align-items: center; gap: 0.35rem; cursor: pointer;">
+            <input type="checkbox" id="toggle-boxes" checked>
+            <span>แสดงกรอบข้อความ (Bounding Boxes)</span>
+          </label>
+          <label style="display: flex; align-items: center; gap: 0.35rem; cursor: pointer;" title="สกัดข้อมูลรายจ่ายและแท็กอัตโนมัติหลังอ่าน OCR">
+            <input type="checkbox" id="toggle-auto-extract" checked>
+            <span>Auto-extract รายจ่าย</span>
+          </label>
+        </div>
         <span id="doc-dimensions" style="color: var(--text-muted); font-size: 11px;"></span>
       </div>
     </div>

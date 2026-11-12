@@ -10,6 +10,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const loadingOverlay = document.getElementById('loading-overlay');
   const loadingText = document.getElementById('loading-text');
   const toggleBoxes = document.getElementById('toggle-boxes');
+  const toggleAutoExtract = document.getElementById('toggle-auto-extract');
+  const llmStatusBadge = document.getElementById('llm-status-badge');
   const docDimensions = document.getElementById('doc-dimensions');
 
   // Stats
@@ -87,6 +89,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let isPdfFile = false;
   let lastOcrData = null;
   let searchDebounceTimeout = null;
+  let systemConfigLoaded = false;
 
   // Initialize DB & Inbox status
   refreshDbStats();
@@ -212,6 +215,7 @@ document.addEventListener('DOMContentLoaded', () => {
     formData.append('category', docCategoryInput.value || 'general');
     formData.append('tags', docTagsInput.value || '');
     formData.append('doc_date', docDateInput.value || '');
+    formData.append('auto_extract', toggleAutoExtract ? String(toggleAutoExtract.checked) : 'true');
 
     try {
       const resp = await fetch('/api/ocr', {
@@ -271,7 +275,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     ocrJsonResult.value = JSON.stringify(data, null, 2);
 
-    if (data.is_pdf && data.total_pages > 1) {
+    if (currentFile && data.is_pdf && data.total_pages > 1) {
       isPdfFile = true;
       totalPdfPages = data.total_pages;
       currentPdfPage = data.current_page || 1;
@@ -292,7 +296,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const boxW = data.image_width || docImage.naturalWidth;
         const boxH = data.image_height || docImage.naturalHeight;
         docDimensions.textContent = `ขนาดภาพ: ${boxW} × ${boxH} px`;
-        renderBoundingBoxes(data.lines, boxW, boxH);
+        const activePage = data.current_page || 1;
+        const previewLines = data.is_pdf
+          ? (data.lines || []).filter(line => !line.page || line.page === activePage)
+          : (data.lines || []);
+        renderBoundingBoxes(previewLines, boxW, boxH);
       };
     } else {
       docImage.style.display = 'none';
@@ -469,10 +477,24 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function refreshDbStats() {
     try {
-      const resp = await fetch('/api/documents');
+      const resp = await fetch('/api/system');
+      if (!resp.ok) return;
       const data = await resp.json();
-      if (data.db_stats) {
-        dbCountBadge.textContent = data.db_stats.total_documents || 0;
+      if (data.database) {
+        dbCountBadge.textContent = data.database.total_documents || 0;
+      }
+      if (llmStatusBadge) {
+        if (data.llm_configured) {
+          llmStatusBadge.textContent = `🤖 Hybrid LLM (${data.llm_provider || 'local'})`;
+          llmStatusBadge.classList.add('badge-green');
+        } else {
+          llmStatusBadge.textContent = '⚙️ Offline Regex';
+          llmStatusBadge.classList.remove('badge-green');
+        }
+      }
+      if (!systemConfigLoaded && toggleAutoExtract && typeof data.auto_extract_on_ingest === 'boolean') {
+        toggleAutoExtract.checked = data.auto_extract_on_ingest;
+        systemConfigLoaded = true;
       }
     } catch (e) {
       console.error(e);
@@ -559,6 +581,37 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  function adaptDbDocumentToUi(doc) {
+    return {
+      success: true,
+      doc_id: doc.id,
+      filename: doc.filename,
+      is_pdf: doc.file_type === 'pdf',
+      total_pages: doc.total_pages,
+      current_page: 1,
+      processed_pages_count: doc.total_pages,
+      text: doc.text,
+      lines: doc.lines || [],
+      image_preview: doc.image_preview,
+      image_width: doc.image_width || 0,
+      image_height: doc.image_height || 0,
+      has_source_file: Boolean(doc.has_source_file),
+      category: doc.category || 'general',
+      tags: doc.tags || [],
+      ingestion_channel: doc.ingestion_channel || 'web_upload',
+      doc_date: doc.doc_date || '',
+      expense: doc.expense || null,
+      stats: {
+        duration_ms: doc.duration_ms || 0,
+        avg_ms_per_page: ((doc.duration_ms || 0) / Math.max(1, doc.total_pages || 1)),
+        total_lines: (doc.lines || []).length,
+        avg_confidence: doc.avg_confidence || 1.0,
+        rotation: 0,
+        text_angle: 0.0
+      }
+    };
+  }
+
   async function openDocFromDb(docId) {
     try {
       showLoading('กำลังโหลดเอกสารจากฐานข้อมูล...');
@@ -568,38 +621,11 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!data.success || !data.document) throw new Error('ไม่พบข้อมูลเอกสาร');
 
       const doc = data.document;
+      currentFile = null;
       fileBadge.textContent = doc.filename;
       fileBadge.style.display = 'inline-flex';
 
-      const adaptedData = {
-        success: true,
-        doc_id: doc.id,
-        filename: doc.filename,
-        is_pdf: doc.file_type === 'pdf',
-        total_pages: doc.total_pages,
-        current_page: 1,
-        processed_pages_count: doc.total_pages,
-        text: doc.text,
-        lines: doc.lines || [],
-        image_preview: doc.image_preview,
-        image_width: doc.image_width || 0,
-        image_height: doc.image_height || 0,
-        has_source_file: Boolean(doc.has_source_file),
-        category: doc.category || 'general',
-        tags: doc.tags || [],
-        ingestion_channel: doc.ingestion_channel || 'web_upload',
-        doc_date: doc.doc_date || '',
-        expense: doc.expense || null,
-        stats: {
-          duration_ms: doc.duration_ms || 0,
-          avg_ms_per_page: ((doc.duration_ms || 0) / Math.max(1, doc.total_pages || 1)),
-          total_lines: (doc.lines || []).length,
-          avg_confidence: doc.avg_confidence || 1.0,
-          rotation: 0,
-          text_angle: 0.0
-        }
-      };
-
+      const adaptedData = adaptDbDocumentToUi(doc);
       lastOcrData = adaptedData;
       renderResults(adaptedData);
       showToast('เปิดเอกสารจากฐานข้อมูลสำเร็จ');
@@ -757,9 +783,19 @@ document.addEventListener('DOMContentLoaded', () => {
       const data = await resp.json();
       if (!resp.ok || !data.success) throw new Error(data.detail || 'สกัดข้อมูลไม่สำเร็จ');
       renderLinkedExpenseBanner(data.expense);
+      if (lastOcrData) {
+        lastOcrData.expense = data.expense;
+      }
       if (data.document) {
         docCategoryInput.value = data.document.category || 'general';
         docTagsInput.value = (data.document.tags || []).join(', ');
+        if (lastOcrData) {
+          lastOcrData.category = docCategoryInput.value;
+          lastOcrData.tags = data.document.tags || [];
+        }
+      }
+      if (lastOcrData) {
+        ocrJsonResult.value = JSON.stringify(lastOcrData, null, 2);
       }
       showToast(`สกัดข้อมูลใบเสร็จสำเร็จ (${data.expense.extraction_method})!`);
     } catch (e) {
@@ -863,8 +899,20 @@ document.addEventListener('DOMContentLoaded', () => {
             body: JSON.stringify(payload)
           });
           if (upd.ok) {
+            const updData = await upd.json().catch(() => ({}));
+            if (currentDocId === item.document_id) {
+              const updatedExp = updData.expense || { ...item, ...payload, extraction_method: 'manual' };
+              if (lastOcrData) {
+                lastOcrData.expense = updatedExp;
+                ocrJsonResult.value = JSON.stringify(lastOcrData, null, 2);
+              }
+              renderLinkedExpenseBanner(updatedExp);
+            }
             showToast('บันทึกการแก้ไขรายจ่ายแล้ว');
             loadExpenses();
+          } else {
+            const errData = await upd.json().catch(() => ({}));
+            showToast('บันทึกรายจ่ายไม่สำเร็จ: ' + (errData.detail || upd.statusText));
           }
         });
 
@@ -877,8 +925,18 @@ document.addEventListener('DOMContentLoaded', () => {
           if (!confirm('ต้องการลบข้อมูลรายจ่ายนี้ออกจากตารางสรุปหรือไม่? (ตัวเอกสารในคลังจะยังอยู่)')) return;
           const del = await fetch(`/api/expenses/${item.document_id}`, { method: 'DELETE' });
           if (del.ok) {
+            if (currentDocId === item.document_id) {
+              if (lastOcrData) {
+                lastOcrData.expense = null;
+                ocrJsonResult.value = JSON.stringify(lastOcrData, null, 2);
+              }
+              renderLinkedExpenseBanner(null);
+            }
             showToast('ลบรายการรายจ่ายแล้ว');
             loadExpenses();
+          } else {
+            const errData = await del.json().catch(() => ({}));
+            showToast('ลบรายการรายจ่ายไม่สำเร็จ: ' + (errData.detail || del.statusText));
           }
         });
 
@@ -902,36 +960,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const detail = await detailResp.json();
         if (detail.success && detail.document) {
           const doc = detail.document;
+          currentFile = null;
           fileBadge.textContent = doc.filename;
           fileBadge.style.display = 'inline-flex';
-          const adapted = {
-            success: true,
-            doc_id: doc.id,
-            filename: doc.filename,
-            is_pdf: doc.file_type === 'pdf',
-            total_pages: doc.total_pages,
-            current_page: 1,
-            processed_pages_count: doc.total_pages,
-            text: doc.text,
-            lines: doc.lines || [],
-            image_preview: doc.image_preview,
-            image_width: doc.image_width || 0,
-            image_height: doc.image_height || 0,
-            has_source_file: Boolean(doc.has_source_file),
-            category: doc.category || 'general',
-            tags: doc.tags || [],
-            ingestion_channel: doc.ingestion_channel || 'web_upload',
-            doc_date: doc.doc_date || '',
-            expense: doc.expense || null,
-            stats: {
-              duration_ms: doc.duration_ms || 0,
-              avg_ms_per_page: ((doc.duration_ms || 0) / Math.max(1, doc.total_pages || 1)),
-              total_lines: (doc.lines || []).length,
-              avg_confidence: doc.avg_confidence || 1.0,
-              rotation: 0,
-              text_angle: 0.0
-            }
-          };
+          const adapted = adaptDbDocumentToUi(doc);
           lastOcrData = adapted;
           renderResults(adapted);
         }

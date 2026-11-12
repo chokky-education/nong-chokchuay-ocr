@@ -58,12 +58,20 @@ cp .env.example .env  # (ตัวเลือก) ตั้งค่า Watch F
 
 ```
 openthai-ocr-app/
-├── app.py                      # FastAPI Backend (Endpoints สำหรับ OCR, ค้นหา, จัดการเอกสาร)
-├── database.py                 # SQLite ORM & Full-Text Search (Trigram FTS5)
-├── start.sh                    # Shell script สำหรับเปิดแอปและเบราว์เซอร์อัตโนมัติ
-├── Dockerfile                  # สำหรับ Build เป็น Docker Container ขึ้น Cloud/VPS
+├── app.py                      # FastAPI Backend & Vault/Watcher/Expense REST APIs
+├── config.py                   # AppConfig + โหลดค่า .env (Paths, Watch Folder, LLM settings)
+├── database.py                 # SQLite ORM, Schema Migration, Trigram FTS5 และตาราง expenses
+├── ocr_engine.py               # OpenThai 2.0 ONNX OCR Inference Engine + Geometry alignment
+├── ocr_service.py              # Ingestion Pipeline กลาง (Source File Storage + OCR + Auto-extract)
+├── watcher.py                  # Background Polling Watch Folder (data/inbox/ -> Vault / inbox_failed)
+├── extractor.py                # Offline Thai Regex Receipt Extractor + Optional Text-only LLM Adapter
+├── AGENTS.md                   # คู่มือรันและทดสอบสำหรับ Agent & Developer
+├── CONTEXT.md                  # Domain Glossary สำหรับ Personal Paperless Vault & Expense Tracker
+├── .env.example                # ตัวอย่าง Environment Variables (Watch Folder, Optional Text LLM)
+├── start.sh                    # Shell script สำหรับเปิดเซิร์ฟเวอร์ Local (127.0.0.1:8765)
+├── Dockerfile                  # สำหรับ Build เป็น Docker Container
 ├── requirements.txt            # รายการ Dependencies ทั้งหมด
-├── README.md                   # คู่มือทางเทคนิคและแนวทางการต่อยอด
+├── README.md                   # คู่มือทางเทคนิคและ REST API
 │
 ├── model/                      # โมเดล OpenThai 2.0 OCR Text (Apache-2.0)
 │   ├── det.onnx                # Text Line Detector (PaddlePaddle PP-OCRv6-tiny ~1.8 MB)
@@ -75,18 +83,22 @@ openthai-ocr-app/
 │       └── thai_norm.py        # Normalizer สระ/วรรณยุกต์ไทย
 │
 ├── static/                     # Frontend Web UI (Vanilla JS + CSS สะอาดตา ไม่มี Build step)
-│   ├── index.html              # โครงสร้างหน้าเว็บพร้อมระบบ Modal และ Canvas
+│   ├── index.html              # โครงสร้างหน้าเว็บพร้อม Modal คลังเอกสาร & Dashboard รายจ่าย
 │   ├── styles.css              # Apple/Linear Design System สำหรับ Desktop Web
-│   └── app.js                  # Logic จัดการ Drag-and-drop, Bounding box canvas, API calls
+│   └── app.js                  # Logic Drag-and-drop, Bounding Box, Inline Edit, Expense Dashboard
 │
+├── docs/                       # เอกสาร Architecture Decisions (ADR) และ Workflow
 ├── samples/                    # เอกสารตัวอย่างสำหรับทดสอบ
 │   ├── sample_official_document.png  # บันทึกข้อความราชการ & ตาราง
 │   └── sample_budget_table.png       # รายงานงบประมาณรายจ่าย
 │
-├── data/                       # โฟลเดอร์เก็บข้อมูล (Persistent Data)
-│   ├── documents.db            # ฐานข้อมูล SQLite (เก็บข้อความ, พิกัด Bounding Box, FTS)
-│   └── uploads/                # เก็บไฟล์เอกสารที่อัปโหลด
+├── data/                       # โฟลเดอร์เก็บข้อมูล (Persistent Local Data)
+│   ├── documents.db            # ฐานข้อมูล SQLite (documents, documents_fts, expenses)
+│   ├── uploads/                # ต้นฉบับเอกสารที่บันทึกเก็บไว้ดาวน์โหลด
+│   ├── inbox/                  # Watch Folder สำหรับโยนไฟล์เข้าแล้วประมวลผลอัตโนมัติ
+│   └── inbox_failed/           # Quarantine สำหรับไฟล์ที่เสียหายพร้อมไฟล์ .error.txt
 │
+├── tests/                      # Automated unittest suite (ใช้ Tempdir ไม่กระทบ data/ จริง)
 └── .venv/                      # Python 3.11 Virtual Environment
 ```
 
@@ -114,7 +126,7 @@ uvicorn app:app --host 127.0.0.1 --port 8765 --reload
 
 ## 4. สถาปัตยกรรมฐานข้อมูลและการค้นหา (Database & Full-Text Search)
 
-ระบบใช้ **SQLite 3** ร่วมกับ Extension **FTS5 Trigram Tokenizer** ซึ่งมีความพิเศษคือ **สามารถค้นหาคำย่อย (Substring) ในภาษาไทยที่ไม่มีการเว้นวรรคได้อย่างแม่นยำและรวดเร็ว**:
+ระบบใช้ **SQLite 3** ร่วมกับ **FTS5 Trigram Tokenizer** ทำให้ **ค้นหาคำย่อย (Substring) ในภาษาไทยที่ไม่มีการเว้นวรรค** ได้แม่นยำ พร้อมทำ Schema Migration แบบ Idempotent เพื่อรักษาข้อมูลเดิม:
 
 ### ตารางหลัก (`documents`)
 | Column | Type | คำอธิบาย |
@@ -124,18 +136,43 @@ uvicorn app:app --host 127.0.0.1 --port 8765 --reload
 | `file_type` | TEXT | ชนิดไฟล์ (`image` หรือ `pdf`) |
 | `file_size` | INTEGER | ขนาดไฟล์ (Bytes) |
 | `total_pages`| INTEGER | จำนวนหน้าเอกสาร |
-| `text_content`| TEXT | ข้อความเต็มที่อ่านได้ทั้งหมด เรียงตาม Reading order |
-| `lines_json` | TEXT | ข้อมูล JSON ของแต่ละบรรทัด (ข้อความ, ความมั่นใจ, พิกัด `box` 4 มุม) |
+| `text_content`| TEXT | ข้อความเต็ม (แก้ไขย้อนหลังและ re-index FTS ได้) |
+| `lines_json` | TEXT | JSON บรรทัด (ข้อความ, ความมั่นใจ, พิกัด `box` 4 มุม, `page`) |
 | `avg_confidence`| REAL | คะแนนความมั่นใจเฉลี่ย (0.00 - 1.00) |
 | `duration_ms`| REAL | เวลาที่ใช้ประมวลผล (มิลลิวินาที) |
 | `image_preview`| TEXT | รูปภาพหน้าแรกแบบ Base64 (สำหรับแสดงผล Bounding Boxes) |
-| `created_at` | TEXT | วันที่และเวลาที่สแกนเอกสาร |
+| `source_path` | TEXT | Path ของไฟล์ต้นฉบับที่เก็บใน `data/uploads/` |
+| `category` | TEXT | หมวดหมู่เอกสาร (เช่น `general`, `receipt`, `tax`, `official`) |
+| `tags_json` | TEXT | รายการแท็กแบบ JSON Array |
+| `ingestion_channel`| TEXT | ช่องทางนำเข้า (`web_upload` หรือ `watch_folder`) |
+| `doc_date` | TEXT | วันที่อ้างอิงเอกสาร (`YYYY-MM-DD`) |
+| `image_width` | INTEGER | ความกว้างจริงของภาพที่ใช้อ้างอิงพิกัด Bounding Box (px) |
+| `image_height` | INTEGER | ความสูงจริงของภาพที่ใช้อ้างอิงพิกัด Bounding Box (px) |
+| `created_at` | TEXT | วันที่และเวลาที่นำเข้าเอกสาร |
+| `updated_at` | TEXT | วันที่และเวลาที่แก้ไขล่าสุด |
+
+### ตารางรายจ่าย (`expenses`)
+| Column | Type | คำอธิบาย |
+| :--- | :--- | :--- |
+| `id` | TEXT (UUID) | Primary Key ของรายการรายจ่าย |
+| `document_id` | TEXT UNIQUE | Foreign Key อ้างอิง `documents(id) ON DELETE CASCADE` |
+| `merchant` | TEXT | ชื่อร้านค้า / ผู้ให้บริการ |
+| `expense_date` | TEXT | วันที่รายจ่าย (`YYYY-MM-DD`, แปลง พ.ศ. -> ค.ศ. อัตโนมัติ) |
+| `subtotal` | REAL | ยอดก่อนภาษีมูลค่าเพิ่ม |
+| `vat_amount` | REAL | ภาษีมูลค่าเพิ่ม (VAT) |
+| `total_amount` | REAL | ยอดสุทธิรวม |
+| `currency` | TEXT | สกุลเงิน (ค่าเริ่มต้น `THB`) |
+| `expense_category` | TEXT | หมวดหมู่รายจ่าย (`food`, `transport`, `utilities`, `office`, `other`) |
+| `extraction_method` | TEXT | วิธีที่สกัด (`regex`, `llm`, หรือ `manual`) |
+| `raw_json` | TEXT | Payload JSON ดิบจากการสกัด |
 
 ### ตารางค้นหาเสมือน (`documents_fts`)
 ```sql
 CREATE VIRTUAL TABLE documents_fts USING fts5(
     id UNINDEXED,
     filename,
+    category,
+    tags_text,
     text_content,
     tokenize="trigram"
 );
@@ -152,24 +189,30 @@ ORDER BY d.created_at DESC;
 
 ## 5. รายละเอียด REST API (API Reference)
 
-คุณสามารถนำ API เหล่านี้ไปเชื่อมต่อกับ Frontend อื่นๆ เช่น React, Vue, Next.js, หรือ Mobile App (Flutter / Swift / Kotlin) ได้ทันที:
+สามารถเรียกใช้งาน API เหล่านี้โดยตรงจากแอปพลิเคชันหรือสคริปต์อัตโนมัติในเครื่องได้:
 
-### 1) อัปโหลดและประมวลผล OCR
+### 1) อัปโหลดและประมวลผล OCR + Auto-Extract
 - **Endpoint:** `POST /api/ocr`
 - **Content-Type:** `multipart/form-data`
 - **Parameters:**
   - `file` (File, required): รูปภาพหรือไฟล์ PDF
   - `page` (int, default: 1): หน้าที่ต้องการอ่าน (กรณีเป็น PDF)
   - `process_all_pages` (bool, default: false): อ่านทุกหน้าพร้อมกันหรือไม่
-  - `save_to_db` (bool, default: true): บันทึกลง SQLite ให้อัตโนมัติหรือไม่
+  - `save_to_db` (bool, default: true): บันทึกลง SQLite พร้อมเก็บต้นฉบับใน `data/uploads/`
+  - `category` (string, default: `"general"`): หมวดหมู่เอกสาร
+  - `tags` (string, optional): แท็กคั่นด้วยจุลภาค
+  - `doc_date` (string, optional): วันที่อ้างอิงเอกสาร (`YYYY-MM-DD`)
+  - `auto_extract` (bool, optional): เปิด/ปิดการสกัดรายจ่ายและ auto-tag หลัง OCR (ค่าเริ่มต้นตาม `.env` `AUTO_EXTRACT_ON_INGEST`)
 - **Response Example:**
 ```json
 {
   "success": true,
   "doc_id": "b24aebe5-47e1-4a11-a6e0-5ab41dde35a3",
-  "filename": "document.pdf",
-  "is_pdf": true,
-  "total_pages": 3,
+  "filename": "receipt.png",
+  "is_pdf": false,
+  "total_pages": 1,
+  "image_width": 1024,
+  "image_height": 1440,
   "text": "ข้อความภาษาไทยที่อ่านได้...",
   "lines": [
     {
@@ -188,24 +231,27 @@ ORDER BY d.created_at DESC;
 }
 ```
 
-### 2) ค้นหาและดึงรายการเอกสารในคลัง
-- **Endpoint:** `GET /api/documents`
-- **Query Parameters:**
-  - `query` (string, optional): คำค้นภาษาไทยหรืออังกฤษ
-  - `limit` (int, default: 50)
-  - `offset` (int, default: 0)
-- **Response:** คืนค่า Array ของเอกสาร พร้อม Text Snippet และสถิติรวมของคลัง
+### 2) Vault: ค้นหา แก้ไข และดาวน์โหลดต้นฉบับเอกสาร
+- `GET /api/documents` — ค้นหาและกรองเอกสารด้วย `query` (FTS5), `category`, `tag`, `limit`, `offset`
+- `GET /api/documents/{doc_id}` — ดึงข้อมูลเอกสารฉบับเต็ม, พิกัด Bounding Boxes, Metadata และข้อมูลรายจ่ายที่ผูกอยู่
+- `GET /api/documents/{doc_id}/file` — ดาวน์โหลดไฟล์ต้นฉบับที่เก็บไว้ใน `data/uploads/`
+- `PATCH /api/documents/{doc_id}` — แก้ไข `text`, `category`, `tags`, `doc_date` พร้อม Re-index FTS5 อัตโนมัติ
+- `DELETE /api/documents/{doc_id}` — ลบเอกสาร (และลบข้อมูล `expenses` / `documents_fts` รวมถึงไฟล์ต้นฉบับที่ผูกอยู่)
 
-### 3) ดึงข้อมูลเอกสารรายฉบับ
-- **Endpoint:** `GET /api/documents/{doc_id}`
-- **Response:** คืนค่าข้อมูลฉบับเต็ม ทั้งข้อความ พิกัด Bounding Boxes และภาพตัวอย่าง
+### 3) Watch Folder (`data/inbox/`)
+- `GET /api/watcher/status` — ตรวจสอบสถานะ Background Watcher, จำนวนไฟล์รอ (`pending_count`) และไฟล์ล้มเหลว (`failed_count`)
+- `POST /api/watcher/scan` — สั่งสแกนโฟลเดอร์ `data/inbox/` ทันที (ไฟล์ที่เสียหายจะถูกย้ายไปยัง `data/inbox_failed/` พร้อมไฟล์ `.error.txt`)
 
-### 4) ลบเอกสาร
-- **Endpoint:** `DELETE /api/documents/{doc_id}`
+### 4) Hybrid Expense Extraction & Dashboard
+- `POST /api/documents/{doc_id}/extract` — สกัดข้อมูลรายจ่ายจากเอกสาร (`extraction_method`: `auto`, `regex`, หรือ `llm` โดยส่งเฉพาะข้อความจาก OCR ไม่ส่งภาพ และ Fallback กลับเป็น Regex อัตโนมัติหาก LLM ล้มเหลว)
+- `GET /api/expenses` — ดึงรายการรายจ่ายและยอดรวม KPI (`count`, `subtotal`, `vat_amount`, `total_amount`) รองรับตัวกรอง `month=YYYY-MM` และ `expense_category`
+- `PUT /api/expenses/{doc_id}` — แก้ไข/บันทึกรายการรายจ่ายแบบ Manual
+- `DELETE /api/expenses/{doc_id}` — ลบเฉพาะรายการรายจ่ายออกจากตารางสรุป (คงเอกสารไว้ในคลัง)
+- `GET /api/expenses/export.csv` — ส่งออกรายการรายจ่ายเป็น CSV (UTF-8 with BOM เปิดใน Excel ภาษาไทยไม่เพี้ยน)
 
-### 5) สำรองข้อมูลฐานข้อมูล
-- **Endpoint:** `GET /api/database/download`
-- **Response:** ดาวน์โหลดไฟล์ `opentha_documents.db` สำหรับย้ายเครื่องหรือ Backup
+### 5) ระบบและสำรองข้อมูล
+- `GET /api/system` — ข้อมูลโมเดล, สถิติฐานข้อมูล, สถานะ `llm_configured` และ `auto_extract_on_ingest`
+- `GET /api/database/download` — ดาวน์โหลดไฟล์ `opentha_documents.db` สำหรับ Backup
 
 ---
 
