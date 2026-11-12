@@ -36,6 +36,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const pdfPageIndicator = document.getElementById('pdf-page-indicator');
 
   // Metadata & Vault filter elements
+  const btnScanInbox = document.getElementById('btn-scan-inbox');
+  const inboxCountBadge = document.getElementById('inbox-count-badge');
   const docCategoryInput = document.getElementById('doc-category-input');
   const docTagsInput = document.getElementById('doc-tags-input');
   const docDateInput = document.getElementById('doc-date-input');
@@ -70,8 +72,43 @@ document.addEventListener('DOMContentLoaded', () => {
   let lastOcrData = null;
   let searchDebounceTimeout = null;
 
-  // Initialize DB stats
+  // Initialize DB & Inbox status
   refreshDbStats();
+  refreshInboxStatus();
+  setInterval(() => {
+    refreshInboxStatus();
+    refreshDbStats();
+  }, 8000);
+
+  async function refreshInboxStatus() {
+    try {
+      const resp = await fetch('/api/watcher/status');
+      const data = await resp.json();
+      if (typeof data.pending_count === 'number') {
+        inboxCountBadge.textContent = data.pending_count;
+      }
+      if (data.inbox_dir) {
+        btnScanInbox.title = `โฟลเดอร์ Inbox: ${data.inbox_dir} (ล้มเหลว ${data.failed_count || 0})`;
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  btnScanInbox.addEventListener('click', async () => {
+    try {
+      btnScanInbox.disabled = true;
+      const resp = await fetch('/api/watcher/scan', { method: 'POST' });
+      const data = await resp.json();
+      await refreshInboxStatus();
+      await refreshDbStats();
+      showToast(`สแกน Inbox เสร็จ: สำเร็จ ${data.processed || 0} ไฟล์` + (data.failed ? `, ล้มเหลว ${data.failed} ไฟล์` : ''));
+    } catch (e) {
+      showToast('สแกน Inbox ไม่สำเร็จ: ' + e.message);
+    } finally {
+      btnScanInbox.disabled = false;
+    }
+  });
 
   // Tab switching
   tabBtns.forEach(btn => {

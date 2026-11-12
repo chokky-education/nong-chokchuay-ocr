@@ -17,6 +17,7 @@ import database
 import ocr_service
 from config import AppConfig
 from runtime.line_engine import LineOCR
+from watcher import InboxWatcher
 
 
 class DocumentUpdateRequest(BaseModel):
@@ -45,7 +46,11 @@ def create_app(
         database.init_db(cfg.db_path)
         if fastapi_app.state.engine is None:
             fastapi_app.state.engine = factory()
-        yield
+        fastapi_app.state.watcher.start()
+        try:
+            yield
+        finally:
+            fastapi_app.state.watcher.stop()
 
     application = FastAPI(title="OpenThai 2.0 OCR Studio", version="1.2.0", lifespan=lifespan)
     application.state.config = cfg
@@ -58,6 +63,7 @@ def create_app(
         return application.state.engine
 
     application.state.get_engine = get_engine
+    application.state.watcher = InboxWatcher(config=cfg, engine_getter=get_engine)
 
     application.add_middleware(
         CORSMiddleware,
@@ -183,6 +189,15 @@ def create_app(
         if not os.path.exists(cfg.db_path):
             raise HTTPException(status_code=404, detail="Database file not found")
         return FileResponse(cfg.db_path, filename="opentha_documents.db", media_type="application/octet-stream")
+
+    @application.get("/api/watcher/status")
+    def watcher_status():
+        return application.state.watcher.get_status()
+
+    @application.post("/api/watcher/scan")
+    def watcher_scan():
+        result = application.state.watcher.scan_once(require_stability=False)
+        return {"success": True, **result}
 
     # OCR Processing Endpoint
     @application.post("/api/ocr")

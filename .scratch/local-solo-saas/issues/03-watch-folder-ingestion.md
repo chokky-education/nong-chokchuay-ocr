@@ -4,8 +4,8 @@
 
 **Blocked by:** 02: Vault Source Files, Categories, Tags, Edit Re-index, and Box Alignment
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Valid image and PDF files in the Watch Folder are ingested into the Vault and archived as Source Files
-- [ ] Unreadable or corrupt files are quarantined into the failed inbox directory with an accompanying error note
-- [ ] Background polling checks file-size stability before ingesting and can be triggered on demand via API and UI
+- [x] Valid image and PDF files in the Watch Folder are ingested into the Vault and archived as Source Files
+- [x] Unreadable or corrupt files are quarantined into the failed inbox directory with an accompanying error note
+- [x] Background polling checks file-size stability before ingesting and can be triggered on demand via API and UI
