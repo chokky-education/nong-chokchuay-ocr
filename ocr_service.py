@@ -9,6 +9,7 @@ import pypdfium2 as pdfium
 from PIL import Image
 
 import database
+import extractor
 from config import AppConfig
 
 
@@ -85,6 +86,7 @@ def ingest_document(
     tags: Optional[Union[str, List[str]]] = None,
     ingestion_channel: str = "web_upload",
     doc_date: str = "",
+    auto_extract: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Run OCR on image/PDF bytes and optionally persist Source File and Vault Document."""
     lower_name = (filename or "unknown").lower()
@@ -152,6 +154,9 @@ def ingest_document(
 
     doc_id: Optional[str] = None
     source_path = ""
+    expense_record: Optional[Dict[str, Any]] = None
+    should_auto_extract = config.auto_extract_on_ingest if auto_extract is None else auto_extract
+
     if save_to_db:
         doc_id = str(uuid.uuid4())
         source_path = _persist_source_file(contents, doc_id, filename, is_pdf, config.uploads_dir)
@@ -176,6 +181,42 @@ def ingest_document(
                 image_height=orig_h,
                 db_path=config.db_path,
             )
+            if should_auto_extract and full_text:
+                intel = extractor.extract_document_intelligence(
+                    full_text, config, mode="auto", require_expense_hint=True
+                )
+                suggested_cat = intel.get("doc_category") or "general"
+                suggested_tags = intel.get("tags") or []
+                if (clean_category == "general" and suggested_cat != "general") or (
+                    not clean_tags and suggested_tags
+                ):
+                    new_cat = suggested_cat if clean_category == "general" else clean_category
+                    new_tags = suggested_tags if not clean_tags else clean_tags
+                    updated = database.update_document_metadata(
+                        doc_id,
+                        category=new_cat,
+                        tags=new_tags,
+                        db_path=config.db_path,
+                    )
+                    if updated:
+                        clean_category = updated["category"]
+                        clean_tags = updated["tags"]
+
+                if intel.get("is_expense") and intel.get("expense"):
+                    exp = intel["expense"]
+                    expense_record = database.upsert_expense(
+                        document_id=doc_id,
+                        merchant=exp["merchant"],
+                        expense_date=exp["expense_date"],
+                        subtotal=exp["subtotal"],
+                        vat_amount=exp["vat_amount"],
+                        total_amount=exp["total_amount"],
+                        currency=exp["currency"],
+                        expense_category=exp["expense_category"],
+                        extraction_method=exp["extraction_method"],
+                        raw_json=intel,
+                        db_path=config.db_path,
+                    )
         except Exception:
             if source_path and os.path.exists(source_path):
                 os.remove(source_path)
@@ -199,6 +240,7 @@ def ingest_document(
         "tags": clean_tags,
         "ingestion_channel": ingestion_channel,
         "doc_date": doc_date,
+        "expense": expense_record,
         "stats": {
             "duration_ms": total_duration_ms,
             "avg_ms_per_page": round(total_duration_ms / max(1, len(images)), 1),

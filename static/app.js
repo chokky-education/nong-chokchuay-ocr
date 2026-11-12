@@ -757,6 +757,10 @@ document.addEventListener('DOMContentLoaded', () => {
       const data = await resp.json();
       if (!resp.ok || !data.success) throw new Error(data.detail || 'สกัดข้อมูลไม่สำเร็จ');
       renderLinkedExpenseBanner(data.expense);
+      if (data.document) {
+        docCategoryInput.value = data.document.category || 'general';
+        docTagsInput.value = (data.document.tags || []).join(', ');
+      }
       showToast(`สกัดข้อมูลใบเสร็จสำเร็จ (${data.expense.extraction_method})!`);
     } catch (e) {
       showToast('เกิดข้อผิดพลาด: ' + e.message);

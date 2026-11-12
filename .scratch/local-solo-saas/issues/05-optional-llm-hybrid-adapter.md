@@ -4,8 +4,8 @@
 
 **Blocked by:** 04: Offline Thai Regex Expense Extractor and Dashboard
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] LLM adapter sends strictly OCR text (never raw image bytes) when configured via `.env`
-- [ ] Extraction automatically falls back to offline regex on API errors, timeouts, or invalid JSON responses
-- [ ] Auto-extract and Extraction Method (`regex` / `llm` / `manual`) are visible in API responses and UI
+- [x] LLM adapter sends strictly OCR text (never raw image bytes) when configured via `.env`
+- [x] Extraction automatically falls back to offline regex on API errors, timeouts, or invalid JSON responses
+- [x] Auto-extract and Extraction Method (`regex` / `llm` / `manual`) are visible in API responses and UI

@@ -96,6 +96,8 @@ def create_app(
             "model_size": "~4.2 MB",
             "hardware": "CPU (ONNX Runtime / OpenVINO)",
             "offline": True,
+            "llm_configured": bool(cfg.llm_api_key),
+            "llm_provider": cfg.llm_provider if cfg.llm_api_key else None,
             "license": "Apache-2.0",
             "database": {
                 "type": "SQLite with Trigram Full-Text Search (FTS5)",
@@ -219,7 +221,27 @@ def create_app(
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
 
-        extracted = extractor.extract_expense_regex(doc.get("text") or "")
+        intel = extractor.extract_document_intelligence(
+            doc.get("text") or "",
+            cfg,
+            mode=mode,
+            require_expense_hint=False,
+        )
+        extracted = intel.get("expense") or extractor.extract_expense_regex(doc.get("text") or "")
+
+        suggested_cat = intel.get("doc_category") or "general"
+        suggested_tags = intel.get("tags") or []
+        updated_doc = None
+        if ((doc.get("category") or "general") == "general" and suggested_cat != "general") or (
+            not doc.get("tags") and suggested_tags
+        ):
+            updated_doc = database.update_document_metadata(
+                doc_id,
+                category=suggested_cat if (doc.get("category") or "general") == "general" else doc.get("category"),
+                tags=suggested_tags if not doc.get("tags") else doc.get("tags"),
+                db_path=cfg.db_path,
+            )
+
         expense = database.upsert_expense(
             document_id=doc_id,
             merchant=extracted["merchant"],
@@ -230,10 +252,10 @@ def create_app(
             currency=extracted["currency"],
             expense_category=extracted["expense_category"],
             extraction_method=extracted["extraction_method"],
-            raw_json=extracted,
+            raw_json=intel,
             db_path=cfg.db_path,
         )
-        return {"success": True, "expense": expense}
+        return {"success": True, "expense": expense, "document": updated_doc}
 
     @application.get("/api/expenses")
     def list_expenses(
@@ -326,6 +348,7 @@ def create_app(
         category: str = Form("general"),
         tags: str = Form(""),
         doc_date: str = Form(""),
+        auto_extract: Optional[bool] = Form(None),
     ):
         try:
             contents = await file.read()
@@ -343,6 +366,7 @@ def create_app(
                 tags=tags,
                 ingestion_channel="web_upload",
                 doc_date=doc_date,
+                auto_extract=auto_extract,
             )
             return JSONResponse(result)
         except ValueError as ve:

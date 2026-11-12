@@ -1,5 +1,10 @@
+import json
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
+
+import requests
+
+from config import AppConfig
 
 THAI_MONTHS = {
     "ม.ค.": 1, "มค": 1, "มกราคม": 1,
@@ -183,4 +188,134 @@ def extract_expense_regex(text: str) -> Dict[str, Any]:
         "currency": "THB",
         "expense_category": _infer_expense_category(text or ""),
         "extraction_method": "regex",
+    }
+
+
+def _strip_json_fences(raw_text: str) -> str:
+    cleaned = (raw_text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
+
+
+def _to_float(val: Any, default: float = 0.0) -> float:
+    try:
+        return round(float(val), 2)
+    except (TypeError, ValueError):
+        return default
+
+
+_LLM_SYSTEM_PROMPT = (
+    "You extract structured metadata and receipt/expense fields strictly from Thai/English OCR text. "
+    "Return ONLY valid JSON with keys: "
+    "is_expense (boolean), doc_category (one of: general, receipt, tax, official, contract, manual), "
+    "tags (array of 1-5 short Thai/English tags), merchant (string), expense_date (YYYY-MM-DD or ''), "
+    "subtotal (number), vat_amount (number), total_amount (number), currency (string like THB), "
+    "expense_category (one of: food, transport, utilities, office, other). "
+    "Convert Thai Buddhist Era years (>= 2400) to Gregorian YYYY-MM-DD."
+)
+
+
+def extract_with_llm(text: str, config: AppConfig) -> Dict[str, Any]:
+    """Call optional text-only LLM API (Gemini or OpenAI-compatible) using OCR text only."""
+    if not config.llm_api_key:
+        raise ValueError("LLM API key is not configured")
+
+    prompt_text = f"{_LLM_SYSTEM_PROMPT}\n\nOCR_TEXT:\n{text[:8000]}"
+    provider = (config.llm_provider or "gemini").lower()
+
+    if provider == "gemini":
+        base = (config.llm_base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+        model = config.llm_model or "gemini-2.5-flash"
+        url = f"{base}/models/{model}:generateContent"
+        resp = requests.post(
+            url,
+            headers={"Content-Type": "application/json", "x-goog-api-key": config.llm_api_key},
+            json={
+                "contents": [{"parts": [{"text": prompt_text}]}],
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "responseMimeType": "application/json",
+                },
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        raw_content = payload["candidates"][0]["content"]["parts"][0]["text"]
+    else:
+        base = (config.llm_base_url or "https://api.openai.com/v1").rstrip("/")
+        url = f"{base}/chat/completions"
+        resp = requests.post(
+            url,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {config.llm_api_key}",
+            },
+            json={
+                "model": config.llm_model or "gpt-4o-mini",
+                "temperature": 0.1,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": _LLM_SYSTEM_PROMPT},
+                    {"role": "user", "content": f"OCR_TEXT:\n{text[:8000]}"},
+                ],
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        raw_content = payload["choices"][0]["message"]["content"]
+
+    parsed = json.loads(_strip_json_fences(raw_content))
+    if not isinstance(parsed, dict):
+        raise ValueError("LLM output was not a JSON object")
+
+    valid_doc_cats = {"general", "receipt", "tax", "official", "contract", "manual"}
+    valid_exp_cats = {"food", "transport", "utilities", "office", "other"}
+    doc_cat = str(parsed.get("doc_category") or "general").strip().lower()
+    exp_cat = str(parsed.get("expense_category") or "other").strip().lower()
+    raw_tags = parsed.get("tags") or []
+    tags = [str(t).strip() for t in raw_tags if str(t).strip()][:5] if isinstance(raw_tags, list) else []
+
+    return {
+        "is_expense": bool(parsed.get("is_expense", False)),
+        "doc_category": doc_cat if doc_cat in valid_doc_cats else "general",
+        "tags": tags,
+        "expense": {
+            "merchant": str(parsed.get("merchant") or "").strip()[:120],
+            "expense_date": str(parsed.get("expense_date") or "").strip()[:10],
+            "subtotal": _to_float(parsed.get("subtotal"), 0.0),
+            "vat_amount": _to_float(parsed.get("vat_amount"), 0.0),
+            "total_amount": _to_float(parsed.get("total_amount"), 0.0),
+            "currency": str(parsed.get("currency") or "THB").strip() or "THB",
+            "expense_category": exp_cat if exp_cat in valid_exp_cats else "other",
+            "extraction_method": "llm",
+        },
+    }
+
+
+def extract_document_intelligence(
+    text: str,
+    config: AppConfig,
+    *,
+    mode: str = "auto",
+    require_expense_hint: bool = False,
+) -> Dict[str, Any]:
+    """Run hybrid extraction (text-only LLM when configured, offline Thai Regex fallback)."""
+    clean_mode = (mode or "auto").strip().lower()
+    if clean_mode in ("auto", "llm") and config.llm_api_key:
+        try:
+            return extract_with_llm(text, config)
+        except Exception as exc:
+            print(f"[Extractor] LLM extraction failed, falling back to offline regex: {exc}")
+
+    likely_exp = is_likely_expense(text)
+    expense_data = extract_expense_regex(text) if (likely_exp or not require_expense_hint) else None
+    return {
+        "is_expense": likely_exp if require_expense_hint else True,
+        "doc_category": "receipt" if likely_exp else "general",
+        "tags": [],
+        "expense": expense_data,
     }
