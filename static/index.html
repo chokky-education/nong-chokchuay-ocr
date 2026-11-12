@@ -127,6 +127,21 @@
         </div>
       </div>
 
+      <!-- Document Metadata Bar -->
+      <div class="doc-meta-bar" id="doc-meta-bar">
+        <select id="doc-category-input" class="meta-input" title="หมวดหมู่เอกสาร">
+          <option value="general">📁 ทั่วไป</option>
+          <option value="receipt">🧾 ใบเสร็จ / สลิป</option>
+          <option value="tax">🏛️ ภาษี / บัญชี</option>
+          <option value="official">📝 เอกสารราชการ</option>
+          <option value="contract">📜 สัญญา / กฎหมาย</option>
+          <option value="manual">📘 คู่มือ / อ้างอิง</option>
+        </select>
+        <input type="text" id="doc-tags-input" class="meta-input" placeholder="แท็กคั่นด้วยจุลภาค (เช่น กาแฟ, ภาษี69)">
+        <input type="date" id="doc-date-input" class="meta-input" title="วันที่เอกสาร">
+        <button id="btn-save-doc" class="btn btn-primary btn-sm" disabled>💾 บันทึกการแก้ไข</button>
+      </div>
+
       <!-- Tabs Header -->
       <div class="tabs-header">
         <button class="tab-btn active" data-tab="tab-text">📝 ข้อความที่อ่านได้</button>
@@ -180,6 +195,7 @@
           <span id="footer-doc-id">โมเดล: OpenThai 2.0 OCR Text</span>
         </div>
         <div class="action-buttons">
+          <a id="btn-download-source" href="#" download class="btn btn-secondary btn-sm" style="display: none; text-decoration: none;">📎 ไฟล์ต้นฉบับ</a>
           <button id="btn-copy" class="btn btn-primary btn-sm">📋 คัดลอกข้อความ</button>
           <button id="btn-download-txt" class="btn btn-secondary btn-sm">💾 บันทึก .txt</button>
           <button id="btn-download-json" class="btn btn-secondary btn-sm">📦 บันทึก .json</button>
@@ -203,10 +219,20 @@
       </div>
 
       <div class="modal-body">
-        <!-- Search bar -->
-        <div style="margin-bottom: 1rem; display: flex; gap: 0.5rem;">
-          <input type="text" id="db-search-input" class="search-input" placeholder="🔍 ค้นหาคำในเอกสารทั้งหมด (เช่น 'งบประมาณ', 'ราชกิจจาฯ', 'อนุมัติ')...">
-          <button id="btn-clear-search" class="btn btn-secondary btn-sm">ล้างคำค้น</button>
+        <!-- Search bar & filters -->
+        <div class="vault-filters">
+          <input type="text" id="db-search-input" class="search-input" placeholder="🔍 ค้นหาคำในเอกสารทั้งหมด (เช่น 'งบประมาณ', 'ราชกิจจาฯ')...">
+          <select id="db-category-filter" class="meta-input" style="height: 38px;">
+            <option value="">ทุกหมวดหมู่</option>
+            <option value="general">📁 ทั่วไป</option>
+            <option value="receipt">🧾 ใบเสร็จ / สลิป</option>
+            <option value="tax">🏛️ ภาษี / บัญชี</option>
+            <option value="official">📝 เอกสารราชการ</option>
+            <option value="contract">📜 สัญญา / กฎหมาย</option>
+            <option value="manual">📘 คู่มือ / อ้างอิง</option>
+          </select>
+          <input type="text" id="db-tag-filter" class="meta-input" style="height: 38px;" placeholder="🏷️ กรองตามแท็ก...">
+          <button id="btn-clear-search" class="btn btn-secondary btn-sm" style="height: 38px;">ล้างตัวกรอง</button>
         </div>
 
         <!-- Database stats bar -->

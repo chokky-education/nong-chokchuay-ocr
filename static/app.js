@@ -35,12 +35,21 @@ document.addEventListener('DOMContentLoaded', () => {
   const btnOcrAllPages = document.getElementById('btn-ocr-all-pages');
   const pdfPageIndicator = document.getElementById('pdf-page-indicator');
 
+  // Metadata & Vault filter elements
+  const docCategoryInput = document.getElementById('doc-category-input');
+  const docTagsInput = document.getElementById('doc-tags-input');
+  const docDateInput = document.getElementById('doc-date-input');
+  const btnSaveDoc = document.getElementById('btn-save-doc');
+  const btnDownloadSource = document.getElementById('btn-download-source');
+
   // Database Modal Elements
   const btnOpenDb = document.getElementById('btn-open-db');
   const btnCloseDb = document.getElementById('btn-close-db');
   const dbModal = document.getElementById('db-modal');
   const dbCountBadge = document.getElementById('db-count-badge');
   const dbSearchInput = document.getElementById('db-search-input');
+  const dbCategoryFilter = document.getElementById('db-category-filter');
+  const dbTagFilter = document.getElementById('db-tag-filter');
   const btnClearSearch = document.getElementById('btn-clear-search');
   const docsList = document.getElementById('docs-list');
   const dbSummaryStats = document.getElementById('db-summary-stats');
@@ -54,6 +63,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // State
   let currentFile = null;
+  let currentDocId = null;
   let currentPdfPage = 1;
   let totalPdfPages = 1;
   let isPdfFile = false;
@@ -146,6 +156,9 @@ document.addEventListener('DOMContentLoaded', () => {
     formData.append('page', pageNum);
     formData.append('process_all_pages', processAll);
     formData.append('save_to_db', 'true');
+    formData.append('category', docCategoryInput.value || 'general');
+    formData.append('tags', docTagsInput.value || '');
+    formData.append('doc_date', docDateInput.value || '');
 
     try {
       const resp = await fetch('/api/ocr', {
@@ -155,7 +168,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const data = await resp.json();
       if (!resp.ok || !data.success) {
-        throw new Error(data.error || 'การประมวลผลล้มเหลว');
+        throw new Error(data.error || data.detail || 'การประมวลผลล้มเหลว');
       }
 
       lastOcrData = data;
@@ -172,18 +185,32 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Render OCR Results
   function renderResults(data) {
+    currentDocId = data.doc_id || null;
+    btnSaveDoc.disabled = !currentDocId;
+
+    if (currentDocId && data.has_source_file) {
+      btnDownloadSource.href = `/api/documents/${currentDocId}/file`;
+      btnDownloadSource.style.display = 'inline-flex';
+    } else {
+      btnDownloadSource.style.display = 'none';
+    }
+
+    docCategoryInput.value = data.category || 'general';
+    docTagsInput.value = Array.isArray(data.tags) ? data.tags.join(', ') : (data.tags || '');
+    docDateInput.value = data.doc_date || '';
+
     statTime.textContent = (data.stats.duration_ms / 1000).toFixed(2) + 's';
     statLines.textContent = data.stats.total_lines + ' บรรทัด';
     statConf.textContent = (data.stats.avg_confidence * 100).toFixed(1) + '%';
-    statDbStatus.textContent = data.doc_id ? 'บันทึกแล้ว' : 'ชั่วคราว';
-    footerDocId.textContent = data.doc_id ? `ID: ${data.doc_id}` : 'OpenThai 2.0 OCR Text';
+    statDbStatus.textContent = currentDocId ? 'บันทึกแล้ว' : 'ชั่วคราว';
+    footerDocId.textContent = currentDocId ? `ID: ${currentDocId}` : 'OpenThai 2.0 OCR Text';
 
-    ocrTextResult.value = data.text;
-    updateCharCount(data.text);
+    ocrTextResult.value = data.text || '';
+    updateCharCount(ocrTextResult.value);
 
     let md = `# ผลลัพธ์ OCR จาก OpenThai 2.0\n\n`;
     md += `**ไฟล์:** \`${data.filename}\` | **เวลา:** \`${(data.stats.duration_ms/1000).toFixed(2)}s\` | **ความแม่นยำ:** \`${(data.stats.avg_confidence*100).toFixed(1)}%\`\n\n---\n\n`;
-    md += data.text;
+    md += (data.text || '');
     ocrMarkdownResult.value = md;
 
     ocrJsonResult.value = JSON.stringify(data, null, 2);
@@ -206,9 +233,16 @@ document.addEventListener('DOMContentLoaded', () => {
       docImage.src = data.image_preview;
 
       docImage.onload = () => {
-        docDimensions.textContent = `ขนาดภาพ: ${data.image_width || docImage.naturalWidth} × ${data.image_height || docImage.naturalHeight} px`;
-        renderBoundingBoxes(data.lines, data.image_width || docImage.naturalWidth, data.image_height || docImage.naturalHeight);
+        const boxW = data.image_width || docImage.naturalWidth;
+        const boxH = data.image_height || docImage.naturalHeight;
+        docDimensions.textContent = `ขนาดภาพ: ${boxW} × ${boxH} px`;
+        renderBoundingBoxes(data.lines, boxW, boxH);
       };
+    } else {
+      docImage.style.display = 'none';
+      viewerPlaceholder.style.display = 'block';
+      boxesLayer.innerHTML = '';
+      docDimensions.textContent = '';
     }
 
     renderLinesTable(data.lines);
@@ -308,6 +342,43 @@ document.addEventListener('DOMContentLoaded', () => {
     if (row) row.classList.remove('active');
   }
 
+  // Save edited OCR text & metadata to SQLite + re-index FTS5
+  btnSaveDoc.addEventListener('click', async () => {
+    if (!currentDocId) return;
+    const tags = (docTagsInput.value || '')
+      .split(',')
+      .map(t => t.trim())
+      .filter(Boolean);
+    try {
+      btnSaveDoc.disabled = true;
+      const resp = await fetch(`/api/documents/${currentDocId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: ocrTextResult.value,
+          category: docCategoryInput.value || 'general',
+          tags: tags,
+          doc_date: docDateInput.value || ''
+        })
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) throw new Error(data.detail || 'บันทึกไม่สำเร็จ');
+      if (lastOcrData) {
+        lastOcrData.text = data.document.text;
+        lastOcrData.category = data.document.category;
+        lastOcrData.tags = data.document.tags;
+        lastOcrData.doc_date = data.document.doc_date;
+        ocrJsonResult.value = JSON.stringify(lastOcrData, null, 2);
+      }
+      statDbStatus.textContent = 'อัปเดตแล้ว';
+      showToast('บันทึกข้อความและอัปเดตดัชนีค้นหาสำเร็จ!');
+    } catch (err) {
+      showToast('เกิดข้อผิดพลาด: ' + err.message);
+    } finally {
+      btnSaveDoc.disabled = !currentDocId;
+    }
+  });
+
   // Database Management
   btnOpenDb.addEventListener('click', () => {
     dbModal.style.display = 'flex';
@@ -322,15 +393,21 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.target === dbModal) dbModal.style.display = 'none';
   });
 
-  dbSearchInput.addEventListener('input', () => {
+  function triggerVaultReload() {
     clearTimeout(searchDebounceTimeout);
     searchDebounceTimeout = setTimeout(() => {
-      loadDatabaseDocuments(dbSearchInput.value);
-    }, 250);
-  });
+      loadDatabaseDocuments();
+    }, 220);
+  }
+
+  dbSearchInput.addEventListener('input', triggerVaultReload);
+  dbCategoryFilter.addEventListener('change', () => loadDatabaseDocuments());
+  dbTagFilter.addEventListener('input', triggerVaultReload);
 
   btnClearSearch.addEventListener('click', () => {
     dbSearchInput.value = '';
+    dbCategoryFilter.value = '';
+    dbTagFilter.value = '';
     loadDatabaseDocuments();
   });
 
@@ -346,10 +423,17 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  async function loadDatabaseDocuments(query = '') {
+  async function loadDatabaseDocuments() {
+    const query = (dbSearchInput.value || '').trim();
+    const category = (dbCategoryFilter.value || '').trim();
+    const tag = (dbTagFilter.value || '').trim();
     try {
       docsList.innerHTML = '<div style="text-align: center; padding: 2rem; color: var(--text-muted);">กำลังค้นหา...</div>';
-      const url = query ? `/api/documents?query=${encodeURIComponent(query)}` : '/api/documents';
+      const params = new URLSearchParams();
+      if (query) params.set('query', query);
+      if (category) params.set('category', category);
+      if (tag) params.set('tag', tag);
+      const url = params.toString() ? `/api/documents?${params.toString()}` : '/api/documents';
       const resp = await fetch(url);
       const data = await resp.json();
 
@@ -361,7 +445,7 @@ document.addEventListener('DOMContentLoaded', () => {
         docsList.innerHTML = `
           <div style="text-align: center; padding: 3rem; color: var(--text-muted);">
             <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">🔍</div>
-            <p>${query ? `ไม่พบเอกสารที่มีคำว่า "${escapeHtml(query)}"` : 'ยังไม่มีเอกสารในฐานข้อมูล'}</p>
+            <p>${query ? `ไม่พบเอกสารที่มีคำว่า "${escapeHtml(query)}"` : 'ไม่พบเอกสารที่ตรงกับเงื่อนไข'}</p>
           </div>
         `;
         return;
@@ -374,19 +458,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const confPct = (doc.avg_confidence * 100).toFixed(1);
         const timeSec = (doc.duration_ms / 1000).toFixed(2);
+        const channelLabel = doc.ingestion_channel === 'watch_folder' ? '📥 Inbox' : '🌐 Web';
+        const tagsHtml = (doc.tags || []).map(t => `<span class="tag-pill">#${escapeHtml(t)}</span>`).join(' ');
+        const downloadBtn = doc.has_source_file
+          ? `<a href="/api/documents/${doc.id}/file" download class="btn btn-secondary btn-sm" style="text-decoration: none; justify-content: center;">📎 ต้นฉบับ</a>`
+          : '';
 
         card.innerHTML = `
           <div class="doc-card-info">
             <div class="doc-card-title">
               <span>📄 ${escapeHtml(doc.filename)}</span>
               <span class="badge" style="font-size: 11px;">${doc.file_type.toUpperCase()}</span>
+              <span class="badge" style="font-size: 11px;">${escapeHtml(doc.category || 'general')}</span>
+              <span class="badge" style="font-size: 11px;">${channelLabel}</span>
               <span class="badge badge-green" style="font-size: 11px;">ความมั่นใจ ${confPct}%</span>
             </div>
             <div class="doc-card-meta">
-              <span>📅 ${doc.created_at}</span>
+              <span>📅 ${doc.doc_date || doc.created_at}</span>
               <span>⚡ ${timeSec}s</span>
               <span>📝 ${doc.char_count.toLocaleString()} ตัวอักษร</span>
               <span>📑 ${doc.total_pages} หน้า</span>
+              ${tagsHtml}
             </div>
             <div class="doc-card-snippet">
               ${escapeHtml(doc.snippet)}...
@@ -394,6 +486,7 @@ document.addEventListener('DOMContentLoaded', () => {
           </div>
           <div class="doc-card-actions">
             <button class="btn btn-primary btn-sm btn-open-doc" data-id="${doc.id}">🔍 เปิดดู</button>
+            ${downloadBtn}
             <button class="btn btn-secondary btn-sm btn-copy-doc" data-id="${doc.id}">📋 คัดลอก</button>
             <button class="btn btn-danger btn-sm btn-delete-doc" data-id="${doc.id}">🗑️ ลบ</button>
           </div>
@@ -433,13 +526,18 @@ document.addEventListener('DOMContentLoaded', () => {
         text: doc.text,
         lines: doc.lines || [],
         image_preview: doc.image_preview,
-        image_width: 1200,
-        image_height: 1600,
+        image_width: doc.image_width || 0,
+        image_height: doc.image_height || 0,
+        has_source_file: Boolean(doc.has_source_file),
+        category: doc.category || 'general',
+        tags: doc.tags || [],
+        ingestion_channel: doc.ingestion_channel || 'web_upload',
+        doc_date: doc.doc_date || '',
         stats: {
-          duration_ms: doc.duration_ms,
-          avg_ms_per_page: (doc.duration_ms / doc.total_pages),
+          duration_ms: doc.duration_ms || 0,
+          avg_ms_per_page: ((doc.duration_ms || 0) / Math.max(1, doc.total_pages || 1)),
           total_lines: (doc.lines || []).length,
-          avg_confidence: doc.avg_confidence,
+          avg_confidence: doc.avg_confidence || 1.0,
           rotation: 0,
           text_angle: 0.0
         }
@@ -475,7 +573,12 @@ document.addEventListener('DOMContentLoaded', () => {
       const data = await resp.json();
       if (data.success) {
         showToast('ลบเอกสารสำเร็จ');
-        loadDatabaseDocuments(dbSearchInput.value);
+        if (currentDocId === docId) {
+          currentDocId = null;
+          btnSaveDoc.disabled = true;
+          btnDownloadSource.style.display = 'none';
+        }
+        loadDatabaseDocuments();
         refreshDbStats();
       }
     } catch (e) {

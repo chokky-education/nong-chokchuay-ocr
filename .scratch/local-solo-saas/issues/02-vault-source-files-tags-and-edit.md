@@ -4,10 +4,10 @@
 
 **Blocked by:** 01: Matt Pocock Setup and Test Seam
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Existing Vault Document rows survive idempotent startup migration without data loss
-- [ ] Uploaded Source Files are saved on disk and downloadable via API and UI
-- [ ] Editing OCR text, Category, or Tags updates SQLite and makes new terms immediately searchable via FTS5
-- [ ] Reopening a saved Vault Document renders bounding boxes using stored original dimensions
-- [ ] Deleting a Vault Document cleans up its DB record, FTS entry, and Source File
+- [x] Existing Vault Document rows survive idempotent startup migration without data loss
+- [x] Uploaded Source Files are saved on disk and downloadable via API and UI
+- [x] Editing OCR text, Category, or Tags updates SQLite and makes new terms immediately searchable via FTS5
+- [x] Reopening a saved Vault Document renders bounding boxes using stored original dimensions
+- [x] Deleting a Vault Document cleans up its DB record, FTS entry, and Source File

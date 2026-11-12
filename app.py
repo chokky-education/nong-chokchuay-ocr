@@ -1,16 +1,12 @@
 import os
 import sys
-import time
-import io
-import base64
 from contextlib import asynccontextmanager
-from typing import Optional, List, Dict, Any, Callable
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query, Request
+from typing import Optional, List, Any, Callable
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image
-import pypdfium2 as pdfium
+from pydantic import BaseModel
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "model")
@@ -18,24 +14,23 @@ sys.path.insert(0, BASE_DIR)
 sys.path.insert(0, MODEL_DIR)
 
 import database
+import ocr_service
 from config import AppConfig
 from runtime.line_engine import LineOCR
+
+
+class DocumentUpdateRequest(BaseModel):
+    text: Optional[str] = None
+    category: Optional[str] = None
+    tags: Optional[List[str]] = None
+    doc_date: Optional[str] = None
+
 
 def _default_engine_factory() -> LineOCR:
     print("[Engine] Initializing OpenThai 2.0 OCR Engine from:", MODEL_DIR)
     engine = LineOCR(MODEL_DIR, threads=1)
     print("[Engine] OpenThai 2.0 OCR Engine ready!")
     return engine
-
-def image_to_base64(img: Image.Image, max_dimension: int = 1800) -> str:
-    w, h = img.size
-    if max(w, h) > max_dimension:
-        ratio = max_dimension / max(w, h)
-        img = img.resize((int(w * ratio), int(h * ratio)), Image.Resampling.LANCZOS)
-    
-    buffered = io.BytesIO()
-    img.save(buffered, format="JPEG", quality=85)
-    return "data:image/jpeg;base64," + base64.b64encode(buffered.getvalue()).decode("utf-8")
 
 def create_app(
     config: Optional[AppConfig] = None,
@@ -121,15 +116,30 @@ def create_app(
 
     # Database Endpoints
     @application.get("/api/documents")
-    def list_documents(query: Optional[str] = Query(None), limit: int = 50, offset: int = 0):
-        docs = database.search_documents(query=query, limit=limit, offset=offset, db_path=cfg.db_path)
+    def list_documents(
+        query: Optional[str] = Query(None),
+        category: Optional[str] = Query(None),
+        tag: Optional[str] = Query(None),
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        docs = database.search_documents(
+            query=query,
+            category=category,
+            tag=tag,
+            limit=limit,
+            offset=offset,
+            db_path=cfg.db_path,
+        )
         stats = database.get_db_stats(db_path=cfg.db_path)
         return {
             "success": True,
             "query": query,
+            "category": category,
+            "tag": tag,
             "total": len(docs),
             "db_stats": stats,
-            "documents": docs
+            "documents": docs,
         }
 
     @application.get("/api/documents/{doc_id}")
@@ -138,6 +148,30 @@ def create_app(
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
         return {"success": True, "document": doc}
+
+    @application.get("/api/documents/{doc_id}/file")
+    def download_document_source(doc_id: str):
+        doc = database.get_document_by_id(doc_id, db_path=cfg.db_path)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        src_path = doc.get("source_path") or ""
+        if not src_path or not os.path.exists(src_path):
+            raise HTTPException(status_code=404, detail="Source file not found")
+        return FileResponse(src_path, filename=doc.get("filename") or os.path.basename(src_path))
+
+    @application.patch("/api/documents/{doc_id}")
+    def update_document(doc_id: str, payload: DocumentUpdateRequest):
+        updated = database.update_document_metadata(
+            doc_id=doc_id,
+            text_content=payload.text,
+            category=payload.category,
+            tags=payload.tags,
+            doc_date=payload.doc_date,
+            db_path=cfg.db_path,
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return {"success": True, "document": updated}
 
     @application.delete("/api/documents/{doc_id}")
     def delete_document(doc_id: str):
@@ -156,134 +190,31 @@ def create_app(
         file: UploadFile = File(...),
         page: int = Form(1),
         process_all_pages: bool = Form(False),
-        save_to_db: bool = Form(True)
+        save_to_db: bool = Form(True),
+        category: str = Form("general"),
+        tags: str = Form(""),
+        doc_date: str = Form(""),
     ):
         try:
             contents = await file.read()
-            filename = (file.filename or "unknown").lower()
-            file_size = len(contents)
             engine = get_engine()
-
-            images: List[Image.Image] = []
-            is_pdf = filename.endswith(".pdf") or file.content_type == "application/pdf"
-            total_pages = 1
-
-            if is_pdf:
-                try:
-                    pdf = pdfium.PdfDocument(contents)
-                    total_pages = len(pdf)
-                    if total_pages == 0:
-                        raise HTTPException(status_code=400, detail="PDF contains 0 pages")
-                    
-                    if process_all_pages:
-                        for i in range(total_pages):
-                            p = pdf[i]
-                            images.append(p.render(scale=2.0).to_pil())
-                    else:
-                        target_page = max(1, min(page, total_pages)) - 1
-                        p = pdf[target_page]
-                        images.append(p.render(scale=2.0).to_pil())
-                except Exception as e:
-                    raise HTTPException(status_code=400, detail=f"Failed to read PDF: {str(e)}")
-            else:
-                try:
-                    img = Image.open(io.BytesIO(contents)).convert("RGB")
-                    images.append(img)
-                except Exception as e:
-                    raise HTTPException(status_code=400, detail=f"Invalid image format: {str(e)}")
-
-            start_time = time.time()
-            combined_text = []
-            all_lines: List[Dict[str, Any]] = []
-            all_page_results = []
-            first_img_b64 = ""
-            orig_w, orig_h = 0, 0
-
-            for idx, img in enumerate(images):
-                w, h = img.size
-                if idx == 0:
-                    orig_w, orig_h = w, h
-                    first_img_b64 = image_to_base64(img)
-
-                t_page_start = time.time()
-                ocr_res = engine.read(img)
-                page_duration = (time.time() - t_page_start) * 1000
-
-                page_num = (idx + 1) if process_all_pages else page
-                page_text = ocr_res.get("text", "")
-                lines = ocr_res.get("lines", [])
-
-                clean_lines = []
-                for l_idx, line in enumerate(lines):
-                    line_data = {
-                        "text": line.get("text", ""),
-                        "confidence": round(float(line.get("confidence", 0.0)), 4),
-                        "row": line.get("row", l_idx),
-                        "box": line.get("box", []),
-                        "page": page_num
-                    }
-                    clean_lines.append(line_data)
-                    all_lines.append(line_data)
-
-                combined_text.append(f"--- หน้า {page_num} ---\n" + page_text if total_pages > 1 and process_all_pages else page_text)
-
-                all_page_results.append({
-                    "page": page_num,
-                    "text": page_text,
-                    "lines_count": len(clean_lines),
-                    "rotation": ocr_res.get("rotation", 0),
-                    "text_angle": ocr_res.get("text_angle", 0.0),
-                    "duration_ms": round(page_duration, 1)
-                })
-
-            total_duration_ms = round((time.time() - start_time) * 1000, 1)
-            full_text = "\n\n".join(combined_text).strip()
-
-            confidences = [l["confidence"] for l in all_lines if l.get("confidence") is not None]
-            avg_conf = round(sum(confidences) / len(confidences), 4) if confidences else 1.0
-
-            doc_id = None
-            if save_to_db:
-                try:
-                    doc_id = database.save_document(
-                        filename=file.filename or "uploaded_doc",
-                        file_type="pdf" if is_pdf else "image",
-                        text_content=full_text,
-                        lines=all_lines,
-                        avg_confidence=avg_conf,
-                        duration_ms=total_duration_ms,
-                        total_pages=total_pages if (is_pdf and process_all_pages) else 1,
-                        image_preview=first_img_b64,
-                        file_size=file_size,
-                        db_path=cfg.db_path
-                    )
-                except Exception as dbe:
-                    print("[DB Error] Failed to save document to database:", dbe)
-
-            return JSONResponse({
-                "success": True,
-                "doc_id": doc_id,
-                "filename": file.filename,
-                "is_pdf": is_pdf,
-                "total_pages": total_pages,
-                "current_page": page if not process_all_pages else 1,
-                "processed_pages_count": len(images),
-                "text": full_text,
-                "lines": all_lines,
-                "image_preview": first_img_b64,
-                "image_width": orig_w,
-                "image_height": orig_h,
-                "stats": {
-                    "duration_ms": total_duration_ms,
-                    "avg_ms_per_page": round(total_duration_ms / max(1, len(images)), 1),
-                    "total_lines": len(all_lines),
-                    "avg_confidence": avg_conf,
-                    "rotation": all_page_results[0]["rotation"] if all_page_results else 0,
-                    "text_angle": all_page_results[0]["text_angle"] if all_page_results else 0.0
-                },
-                "page_details": all_page_results
-            })
-
+            result = ocr_service.ingest_document(
+                contents=contents,
+                filename=file.filename or "unknown",
+                engine=engine,
+                config=cfg,
+                content_type=file.content_type,
+                page=page,
+                process_all_pages=process_all_pages,
+                save_to_db=save_to_db,
+                category=category,
+                tags=tags,
+                ingestion_channel="web_upload",
+                doc_date=doc_date,
+            )
+            return JSONResponse(result)
+        except ValueError as ve:
+            raise HTTPException(status_code=400, detail=str(ve))
         except HTTPException:
             raise
         except Exception as e:
