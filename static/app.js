@@ -38,6 +38,22 @@ document.addEventListener('DOMContentLoaded', () => {
   // Metadata & Vault filter elements
   const btnScanInbox = document.getElementById('btn-scan-inbox');
   const inboxCountBadge = document.getElementById('inbox-count-badge');
+  const btnOpenExpenses = document.getElementById('btn-open-expenses');
+  const btnExtractExpense = document.getElementById('btn-extract-expense');
+  const expenseBanner = document.getElementById('expense-banner');
+  const expenseBannerText = document.getElementById('expense-banner-text');
+  const btnViewInExpenses = document.getElementById('btn-view-in-expenses');
+  const expenseModal = document.getElementById('expense-modal');
+  const btnCloseExpenses = document.getElementById('btn-close-expenses');
+  const expenseMonthFilter = document.getElementById('expense-month-filter');
+  const expenseCategoryFilter = document.getElementById('expense-category-filter');
+  const btnClearExpenseFilters = document.getElementById('btn-clear-expense-filters');
+  const btnExportExpensesCsv = document.getElementById('btn-export-expenses-csv');
+  const expensesTbody = document.getElementById('expenses-tbody');
+  const expKpiCount = document.getElementById('exp-kpi-count');
+  const expKpiSubtotal = document.getElementById('exp-kpi-subtotal');
+  const expKpiVat = document.getElementById('exp-kpi-vat');
+  const expKpiTotal = document.getElementById('exp-kpi-total');
   const docCategoryInput = document.getElementById('doc-category-input');
   const docTagsInput = document.getElementById('doc-tags-input');
   const docDateInput = document.getElementById('doc-date-input');
@@ -224,6 +240,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function renderResults(data) {
     currentDocId = data.doc_id || null;
     btnSaveDoc.disabled = !currentDocId;
+    btnExtractExpense.disabled = !currentDocId;
 
     if (currentDocId && data.has_source_file) {
       btnDownloadSource.href = `/api/documents/${currentDocId}/file`;
@@ -231,6 +248,8 @@ document.addEventListener('DOMContentLoaded', () => {
     } else {
       btnDownloadSource.style.display = 'none';
     }
+
+    renderLinkedExpenseBanner(data.expense || null);
 
     docCategoryInput.value = data.category || 'general';
     docTagsInput.value = Array.isArray(data.tags) ? data.tags.join(', ') : (data.tags || '');
@@ -570,6 +589,7 @@ document.addEventListener('DOMContentLoaded', () => {
         tags: doc.tags || [],
         ingestion_channel: doc.ingestion_channel || 'web_upload',
         doc_date: doc.doc_date || '',
+        expense: doc.expense || null,
         stats: {
           duration_ms: doc.duration_ms || 0,
           avg_ms_per_page: ((doc.duration_ms || 0) / Math.max(1, doc.total_pages || 1)),
@@ -613,7 +633,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (currentDocId === docId) {
           currentDocId = null;
           btnSaveDoc.disabled = true;
+          btnExtractExpense.disabled = true;
           btnDownloadSource.style.display = 'none';
+          renderLinkedExpenseBanner(null);
         }
         loadDatabaseDocuments();
         refreshDbStats();
@@ -712,6 +734,155 @@ document.addEventListener('DOMContentLoaded', () => {
               .replace(/>/g, '&gt;')
               .replace(/"/g, '&quot;')
               .replace(/'/g, '&#039;');
+  }
+
+  function renderLinkedExpenseBanner(expense) {
+    if (!expense) {
+      expenseBanner.style.display = 'none';
+      return;
+    }
+    expenseBanner.style.display = 'flex';
+    const dt = expense.expense_date || 'ไม่ระบุวันที่';
+    const merchant = expense.merchant || 'ไม่ระบุร้านค้า';
+    const total = Number(expense.total_amount || 0).toFixed(2);
+    const vat = Number(expense.vat_amount || 0).toFixed(2);
+    expenseBannerText.textContent = `🧾 รายจ่าย (${expense.extraction_method}): ${merchant} | 📅 ${dt} | VAT ${vat} | รวม ${total} ${expense.currency || 'THB'}`;
+  }
+
+  btnExtractExpense.addEventListener('click', async () => {
+    if (!currentDocId) return;
+    try {
+      btnExtractExpense.disabled = true;
+      const resp = await fetch(`/api/documents/${currentDocId}/extract`, { method: 'POST' });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) throw new Error(data.detail || 'สกัดข้อมูลไม่สำเร็จ');
+      renderLinkedExpenseBanner(data.expense);
+      showToast(`สกัดข้อมูลใบเสร็จสำเร็จ (${data.expense.extraction_method})!`);
+    } catch (e) {
+      showToast('เกิดข้อผิดพลาด: ' + e.message);
+    } finally {
+      btnExtractExpense.disabled = !currentDocId;
+    }
+  });
+
+  btnViewInExpenses.addEventListener('click', () => {
+    expenseModal.style.display = 'flex';
+    loadExpenses();
+  });
+
+  btnOpenExpenses.addEventListener('click', () => {
+    expenseModal.style.display = 'flex';
+    loadExpenses();
+  });
+
+  btnCloseExpenses.addEventListener('click', () => {
+    expenseModal.style.display = 'none';
+  });
+
+  expenseModal.addEventListener('click', (e) => {
+    if (e.target === expenseModal) expenseModal.style.display = 'none';
+  });
+
+  expenseMonthFilter.addEventListener('change', () => loadExpenses());
+  expenseCategoryFilter.addEventListener('change', () => loadExpenses());
+  btnClearExpenseFilters.addEventListener('click', () => {
+    expenseMonthFilter.value = '';
+    expenseCategoryFilter.value = '';
+    loadExpenses();
+  });
+
+  async function loadExpenses() {
+    const month = (expenseMonthFilter.value || '').trim();
+    const cat = (expenseCategoryFilter.value || '').trim();
+    const params = new URLSearchParams();
+    if (month) params.set('month', month);
+    if (cat) params.set('expense_category', cat);
+
+    const csvParams = params.toString();
+    btnExportExpensesCsv.href = csvParams ? `/api/expenses/export.csv?${csvParams}` : '/api/expenses/export.csv';
+
+    try {
+      const url = csvParams ? `/api/expenses?${csvParams}` : '/api/expenses';
+      const resp = await fetch(url);
+      const data = await resp.json();
+      const summary = data.summary || { count: 0, subtotal: 0, vat_amount: 0, total_amount: 0 };
+      expKpiCount.textContent = summary.count || 0;
+      expKpiSubtotal.textContent = Number(summary.subtotal || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      expKpiVat.textContent = Number(summary.vat_amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      expKpiTotal.textContent = Number(summary.total_amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+      const items = data.expenses || [];
+      if (items.length === 0) {
+        expensesTbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-muted); padding: 2rem;">ยังไม่มีรายการรายจ่ายตามเงื่อนไขที่เลือก</td></tr>';
+        return;
+      }
+
+      expensesTbody.innerHTML = '';
+      items.forEach(item => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td><input type="date" class="meta-input exp-date" value="${escapeHtml(item.expense_date)}" style="width: 130px;"></td>
+          <td><input type="text" class="meta-input exp-merchant" value="${escapeHtml(item.merchant)}" style="min-width: 150px;"></td>
+          <td>
+            <select class="meta-input exp-cat" style="width: 120px;">
+              <option value="food" ${item.expense_category === 'food' ? 'selected' : ''}>อาหาร/กาแฟ</option>
+              <option value="transport" ${item.expense_category === 'transport' ? 'selected' : ''}>เดินทาง/น้ำมัน</option>
+              <option value="utilities" ${item.expense_category === 'utilities' ? 'selected' : ''}>สาธารณูปโภค</option>
+              <option value="office" ${item.expense_category === 'office' ? 'selected' : ''}>สำนักงาน/ซอฟต์แวร์</option>
+              <option value="other" ${item.expense_category === 'other' ? 'selected' : ''}>อื่นๆ</option>
+            </select>
+          </td>
+          <td><input type="number" step="0.01" class="meta-input exp-sub" value="${Number(item.subtotal || 0).toFixed(2)}" style="width: 90px;"></td>
+          <td><input type="number" step="0.01" class="meta-input exp-vat" value="${Number(item.vat_amount || 0).toFixed(2)}" style="width: 80px;"></td>
+          <td><input type="number" step="0.01" class="meta-input exp-total" value="${Number(item.total_amount || 0).toFixed(2)}" style="width: 95px; font-weight: 600;"></td>
+          <td><span class="badge" style="font-size: 11px;">${escapeHtml(item.extraction_method)}</span></td>
+          <td style="white-space: nowrap; display: flex; gap: 0.25rem;">
+            <button class="btn btn-primary btn-sm btn-save-exp">💾</button>
+            <button class="btn btn-secondary btn-sm btn-open-exp-doc">🔍</button>
+            <button class="btn btn-danger btn-sm btn-del-exp">🗑️</button>
+          </td>
+        `;
+
+        tr.querySelector('.btn-save-exp').addEventListener('click', async () => {
+          const payload = {
+            expense_date: tr.querySelector('.exp-date').value || '',
+            merchant: tr.querySelector('.exp-merchant').value || '',
+            expense_category: tr.querySelector('.exp-cat').value || 'other',
+            subtotal: parseFloat(tr.querySelector('.exp-sub').value || '0') || 0,
+            vat_amount: parseFloat(tr.querySelector('.exp-vat').value || '0') || 0,
+            total_amount: parseFloat(tr.querySelector('.exp-total').value || '0') || 0,
+            currency: item.currency || 'THB'
+          };
+          const upd = await fetch(`/api/expenses/${item.document_id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          if (upd.ok) {
+            showToast('บันทึกการแก้ไขรายจ่ายแล้ว');
+            loadExpenses();
+          }
+        });
+
+        tr.querySelector('.btn-open-exp-doc').addEventListener('click', () => {
+          expenseModal.style.display = 'none';
+          openDocFromDb(item.document_id);
+        });
+
+        tr.querySelector('.btn-del-exp').addEventListener('click', async () => {
+          if (!confirm('ต้องการลบข้อมูลรายจ่ายนี้ออกจากตารางสรุปหรือไม่? (ตัวเอกสารในคลังจะยังอยู่)')) return;
+          const del = await fetch(`/api/expenses/${item.document_id}`, { method: 'DELETE' });
+          if (del.ok) {
+            showToast('ลบรายการรายจ่ายแล้ว');
+            loadExpenses();
+          }
+        });
+
+        expensesTbody.appendChild(tr);
+      });
+    } catch (e) {
+      expensesTbody.innerHTML = `<tr><td colspan="8" style="color: red; padding: 1rem;">โหลดข้อมูลไม่สำเร็จ: ${escapeHtml(e.message)}</td></tr>`;
+    }
   }
 
   // Preload sample on start

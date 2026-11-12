@@ -181,6 +181,25 @@ def init_db(db_path: Optional[str] = None) -> None:
                 row["text_content"] or "",
             )
 
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS expenses (
+        id TEXT PRIMARY KEY,
+        document_id TEXT NOT NULL UNIQUE,
+        merchant TEXT DEFAULT '',
+        expense_date TEXT DEFAULT '',
+        subtotal REAL DEFAULT 0.0,
+        vat_amount REAL DEFAULT 0.0,
+        total_amount REAL DEFAULT 0.0,
+        currency TEXT DEFAULT 'THB',
+        expense_category TEXT DEFAULT 'other',
+        extraction_method TEXT DEFAULT 'regex',
+        raw_json TEXT DEFAULT '{}',
+        created_at TEXT,
+        updated_at TEXT,
+        FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+    );
+    """)
+
     conn.commit()
     conn.close()
     print("[DB] Database initialized at:", target_path)
@@ -446,6 +465,16 @@ def get_document_by_id(doc_id: str, db_path: Optional[str] = None) -> Optional[D
             lines = []
 
     src_path = row["source_path"] or ""
+    expense_row = None
+    try:
+        conn2 = get_db_connection(db_path)
+        exp = conn2.execute("SELECT * FROM expenses WHERE document_id = ?", (doc_id,)).fetchone()
+        conn2.close()
+        if exp:
+            expense_row = _format_expense_row(exp)
+    except Exception:
+        expense_row = None
+
     return {
         "id": row["id"],
         "filename": row["filename"],
@@ -465,9 +494,175 @@ def get_document_by_id(doc_id: str, db_path: Optional[str] = None) -> Optional[D
         "doc_date": row["doc_date"] or "",
         "image_width": row["image_width"] or 0,
         "image_height": row["image_height"] or 0,
+        "expense": expense_row,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def _format_expense_row(row: sqlite3.Row, filename: Optional[str] = None) -> Dict[str, Any]:
+    raw_meta = {}
+    if row["raw_json"]:
+        try:
+            raw_meta = json.loads(row["raw_json"])
+        except Exception:
+            raw_meta = {}
+    out = {
+        "id": row["id"],
+        "document_id": row["document_id"],
+        "merchant": row["merchant"] or "",
+        "expense_date": row["expense_date"] or "",
+        "subtotal": round(float(row["subtotal"] or 0.0), 2),
+        "vat_amount": round(float(row["vat_amount"] or 0.0), 2),
+        "total_amount": round(float(row["total_amount"] or 0.0), 2),
+        "currency": row["currency"] or "THB",
+        "expense_category": row["expense_category"] or "other",
+        "extraction_method": row["extraction_method"] or "regex",
+        "raw_json": raw_meta,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+    if filename is not None:
+        out["filename"] = filename
+    return out
+
+
+def upsert_expense(
+    document_id: str,
+    *,
+    merchant: str = "",
+    expense_date: str = "",
+    subtotal: float = 0.0,
+    vat_amount: float = 0.0,
+    total_amount: float = 0.0,
+    currency: str = "THB",
+    expense_category: str = "other",
+    extraction_method: str = "regex",
+    raw_json: Optional[Dict[str, Any]] = None,
+    db_path: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Create or update the Expense Record attached to a Vault Document."""
+    conn = get_db_connection(db_path)
+    cursor = conn.cursor()
+    doc_exists = cursor.execute("SELECT id FROM documents WHERE id = ?", (document_id,)).fetchone()
+    if not doc_exists:
+        conn.close()
+        return None
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    existing = cursor.execute(
+        "SELECT id, created_at FROM expenses WHERE document_id = ?", (document_id,)
+    ).fetchone()
+    expense_id = existing["id"] if existing else str(uuid.uuid4())
+    created_at = existing["created_at"] if existing else now
+    raw_str = json.dumps(raw_json or {}, ensure_ascii=False)
+
+    cursor.execute(
+        """
+        INSERT INTO expenses (
+            id, document_id, merchant, expense_date, subtotal,
+            vat_amount, total_amount, currency, expense_category,
+            extraction_method, raw_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(document_id) DO UPDATE SET
+            merchant = excluded.merchant,
+            expense_date = excluded.expense_date,
+            subtotal = excluded.subtotal,
+            vat_amount = excluded.vat_amount,
+            total_amount = excluded.total_amount,
+            currency = excluded.currency,
+            expense_category = excluded.expense_category,
+            extraction_method = excluded.extraction_method,
+            raw_json = excluded.raw_json,
+            updated_at = excluded.updated_at
+        """,
+        (
+            expense_id,
+            document_id,
+            merchant.strip(),
+            expense_date.strip(),
+            round(float(subtotal or 0.0), 2),
+            round(float(vat_amount or 0.0), 2),
+            round(float(total_amount or 0.0), 2),
+            (currency or "THB").strip() or "THB",
+            (expense_category or "other").strip() or "other",
+            (extraction_method or "regex").strip() or "regex",
+            raw_str,
+            created_at,
+            now,
+        ),
+    )
+    conn.commit()
+    row = cursor.execute(
+        """
+        SELECT e.*, d.filename
+        FROM expenses e
+        JOIN documents d ON d.id = e.document_id
+        WHERE e.document_id = ?
+        """,
+        (document_id,),
+    ).fetchone()
+    conn.close()
+    return _format_expense_row(row, filename=row["filename"]) if row else None
+
+
+def list_expenses(
+    month: Optional[str] = None,
+    expense_category: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """List Expense Records and compute aggregate totals optionally filtered by YYYY-MM or category."""
+    conn = get_db_connection(db_path)
+    clauses: List[str] = []
+    params: List[Any] = []
+    if month and month.strip():
+        clauses.append("e.expense_date LIKE ?")
+        params.append(f"{month.strip()}%")
+    if expense_category and expense_category.strip() and expense_category.strip().lower() != "all":
+        clauses.append("e.expense_category = ?")
+        params.append(expense_category.strip())
+
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = conn.execute(
+        f"""
+        SELECT e.*, d.filename
+        FROM expenses e
+        JOIN documents d ON d.id = e.document_id
+        {where_sql}
+        ORDER BY COALESCE(NULLIF(e.expense_date, ''), e.created_at) DESC, e.created_at DESC
+        """,
+        params,
+    ).fetchall()
+    conn.close()
+
+    items = [_format_expense_row(r, filename=r["filename"]) for r in rows]
+    total_amount = round(sum(item["total_amount"] for item in items), 2)
+    vat_amount = round(sum(item["vat_amount"] for item in items), 2)
+    subtotal = round(sum(item["subtotal"] for item in items), 2)
+    by_category: Dict[str, float] = {}
+    for item in items:
+        cat = item["expense_category"] or "other"
+        by_category[cat] = round(by_category.get(cat, 0.0) + item["total_amount"], 2)
+
+    return {
+        "expenses": items,
+        "summary": {
+            "count": len(items),
+            "subtotal": subtotal,
+            "vat_amount": vat_amount,
+            "total_amount": total_amount,
+            "by_category": by_category,
+        },
+    }
+
+
+def delete_expense(document_id: str, db_path: Optional[str] = None) -> bool:
+    conn = get_db_connection(db_path)
+    cur = conn.execute("DELETE FROM expenses WHERE document_id = ?", (document_id,))
+    deleted = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
 
 
 def delete_document(doc_id: str, db_path: Optional[str] = None) -> bool:

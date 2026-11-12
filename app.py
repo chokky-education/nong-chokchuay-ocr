@@ -1,9 +1,11 @@
+import csv
+import io
 import os
 import sys
 from contextlib import asynccontextmanager
 from typing import Optional, List, Any, Callable
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -14,6 +16,7 @@ sys.path.insert(0, BASE_DIR)
 sys.path.insert(0, MODEL_DIR)
 
 import database
+import extractor
 import ocr_service
 from config import AppConfig
 from runtime.line_engine import LineOCR
@@ -25,6 +28,16 @@ class DocumentUpdateRequest(BaseModel):
     category: Optional[str] = None
     tags: Optional[List[str]] = None
     doc_date: Optional[str] = None
+
+
+class ExpenseUpsertRequest(BaseModel):
+    merchant: str = ""
+    expense_date: str = ""
+    subtotal: float = 0.0
+    vat_amount: float = 0.0
+    total_amount: float = 0.0
+    currency: str = "THB"
+    expense_category: str = "other"
 
 
 def _default_engine_factory() -> LineOCR:
@@ -198,6 +211,110 @@ def create_app(
     def watcher_scan():
         result = application.state.watcher.scan_once(require_stability=False)
         return {"success": True, **result}
+
+    # Expense Extraction & Reporting Endpoints
+    @application.post("/api/documents/{doc_id}/extract")
+    def extract_document_expense(doc_id: str, mode: str = Query("auto")):
+        doc = database.get_document_by_id(doc_id, db_path=cfg.db_path)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        extracted = extractor.extract_expense_regex(doc.get("text") or "")
+        expense = database.upsert_expense(
+            document_id=doc_id,
+            merchant=extracted["merchant"],
+            expense_date=extracted["expense_date"],
+            subtotal=extracted["subtotal"],
+            vat_amount=extracted["vat_amount"],
+            total_amount=extracted["total_amount"],
+            currency=extracted["currency"],
+            expense_category=extracted["expense_category"],
+            extraction_method=extracted["extraction_method"],
+            raw_json=extracted,
+            db_path=cfg.db_path,
+        )
+        return {"success": True, "expense": expense}
+
+    @application.get("/api/expenses")
+    def list_expenses(
+        month: Optional[str] = Query(None),
+        expense_category: Optional[str] = Query(None),
+    ):
+        data = database.list_expenses(
+            month=month,
+            expense_category=expense_category,
+            db_path=cfg.db_path,
+        )
+        return {"success": True, **data}
+
+    @application.put("/api/expenses/{doc_id}")
+    def update_expense(doc_id: str, payload: ExpenseUpsertRequest):
+        expense = database.upsert_expense(
+            document_id=doc_id,
+            merchant=payload.merchant,
+            expense_date=payload.expense_date,
+            subtotal=payload.subtotal,
+            vat_amount=payload.vat_amount,
+            total_amount=payload.total_amount,
+            currency=payload.currency,
+            expense_category=payload.expense_category,
+            extraction_method="manual",
+            raw_json=payload.model_dump(),
+            db_path=cfg.db_path,
+        )
+        if not expense:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return {"success": True, "expense": expense}
+
+    @application.delete("/api/expenses/{doc_id}")
+    def delete_expense(doc_id: str):
+        deleted = database.delete_expense(doc_id, db_path=cfg.db_path)
+        return {"success": deleted, "document_id": doc_id}
+
+    @application.get("/api/expenses/export.csv")
+    def export_expenses_csv(
+        month: Optional[str] = Query(None),
+        expense_category: Optional[str] = Query(None),
+    ):
+        data = database.list_expenses(
+            month=month,
+            expense_category=expense_category,
+            db_path=cfg.db_path,
+        )
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([
+            "expense_date",
+            "merchant",
+            "expense_category",
+            "subtotal",
+            "vat_amount",
+            "total_amount",
+            "currency",
+            "extraction_method",
+            "filename",
+            "document_id",
+        ])
+        for item in data["expenses"]:
+            writer.writerow([
+                item["expense_date"],
+                item["merchant"],
+                item["expense_category"],
+                f"{item['subtotal']:.2f}",
+                f"{item['vat_amount']:.2f}",
+                f"{item['total_amount']:.2f}",
+                item["currency"],
+                item["extraction_method"],
+                item.get("filename", ""),
+                item["document_id"],
+            ])
+        csv_bytes = ("\ufeff" + buf.getvalue()).encode("utf-8")
+        suffix = f"_{month}" if month else ""
+        return Response(
+            content=csv_bytes,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="expenses{suffix}.csv"'},
+        )
 
     # OCR Processing Endpoint
     @application.post("/api/ocr")

@@ -4,8 +4,8 @@
 
 **Blocked by:** 02: Vault Source Files, Categories, Tags, Edit Re-index, and Box Alignment
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Offline regex parser converts Buddhist Era dates (`พ.ศ.`) to Gregorian ISO dates and extracts total, VAT, subtotal, and merchant
-- [ ] Users can extract, view, edit, and delete Expense Records linked to Vault Documents
-- [ ] Monthly Expense Dashboard displays totals and exports Excel-compatible UTF-8 BOM CSV
+- [x] Offline regex parser converts Buddhist Era dates (`พ.ศ.`) to Gregorian ISO dates and extracts total, VAT, subtotal, and merchant
+- [x] Users can extract, view, edit, and delete Expense Records linked to Vault Documents
+- [x] Monthly Expense Dashboard displays totals and exports Excel-compatible UTF-8 BOM CSV

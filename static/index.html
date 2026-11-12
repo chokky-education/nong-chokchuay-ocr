@@ -25,6 +25,9 @@
         <span>📥 สแกน Inbox</span>
         <span id="inbox-count-badge" class="badge" style="padding: 1px 6px; font-size: 11px;">0</span>
       </button>
+      <button id="btn-open-expenses" class="btn btn-amber btn-sm" style="font-weight: 600; display: flex; align-items: center; gap: 0.35rem; padding: 0.4rem 0.8rem;">
+        <span>💰 สรุปรายจ่าย</span>
+      </button>
       <button id="btn-open-db" class="btn btn-secondary btn-sm" style="font-weight: 600; display: flex; align-items: center; gap: 0.35rem; padding: 0.4rem 0.8rem; background: #e0f2fe; color: #0369a1; border-color: #bae6fd;">
         <span>📚 คลังเอกสารในเครื่อง</span>
         <span id="db-count-badge" class="badge" style="background: #0284c7; color: white; border: none; padding: 1px 6px; font-size: 11px;">0</span>
@@ -146,6 +149,12 @@
         <button id="btn-save-doc" class="btn btn-primary btn-sm" disabled>💾 บันทึกการแก้ไข</button>
       </div>
 
+      <!-- Linked Expense Strip -->
+      <div class="expense-banner" id="expense-banner" style="display: none;">
+        <span id="expense-banner-text">🧾 ยังไม่มีข้อมูลรายจ่าย</span>
+        <button id="btn-view-in-expenses" class="btn btn-secondary btn-sm">เปิดดูในตารางรายจ่าย</button>
+      </div>
+
       <!-- Tabs Header -->
       <div class="tabs-header">
         <button class="tab-btn active" data-tab="tab-text">📝 ข้อความที่อ่านได้</button>
@@ -199,6 +208,7 @@
           <span id="footer-doc-id">โมเดล: OpenThai 2.0 OCR Text</span>
         </div>
         <div class="action-buttons">
+          <button id="btn-extract-expense" class="btn btn-amber btn-sm" disabled>🧾 สกัดบิล/รายจ่าย</button>
           <a id="btn-download-source" href="#" download class="btn btn-secondary btn-sm" style="display: none; text-decoration: none;">📎 ไฟล์ต้นฉบับ</a>
           <button id="btn-copy" class="btn btn-primary btn-sm">📋 คัดลอกข้อความ</button>
           <button id="btn-download-txt" class="btn btn-secondary btn-sm">💾 บันทึก .txt</button>
@@ -247,6 +257,76 @@
         <!-- Documents list -->
         <div class="docs-list" id="docs-list">
           <!-- Filled dynamically by JavaScript -->
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Expense Dashboard Modal -->
+  <div class="modal-backdrop" id="expense-modal" style="display: none;">
+    <div class="modal-content" style="max-width: 1100px;">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <h2 style="font-size: 1.125rem; font-weight: 700;">💰 ตารางสรุปรายจ่าย & ใบเสร็จ (Expense Tracker)</h2>
+          <span class="badge" style="background: #fffbeb; color: #b45309; border-color: #fde68a;">Offline + Hybrid</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <a id="btn-export-expenses-csv" href="/api/expenses/export.csv" download class="btn btn-secondary btn-sm" style="text-decoration: none;">📥 Export CSV (Excel)</a>
+          <button id="btn-close-expenses" class="btn btn-secondary btn-sm">✕ ปิด</button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="vault-filters" style="grid-template-columns: 180px 180px auto 1fr;">
+          <input type="month" id="expense-month-filter" class="meta-input" style="height: 36px;">
+          <select id="expense-category-filter" class="meta-input" style="height: 36px;">
+            <option value="">ทุกหมวดรายจ่าย</option>
+            <option value="food">🍜 อาหาร / กาแฟ</option>
+            <option value="transport">🚕 เดินทาง / น้ำมัน</option>
+            <option value="utilities">💡 สาธารณูปโภค / เน็ต</option>
+            <option value="office">📎 อุปกรณ์สำนักงาน / ซอฟต์แวร์</option>
+            <option value="other">📦 อื่นๆ</option>
+          </select>
+          <button id="btn-clear-expense-filters" class="btn btn-secondary btn-sm" style="height: 36px;">ดูทั้งหมด</button>
+          <div></div>
+        </div>
+
+        <div class="expense-kpis">
+          <div class="kpi-card">
+            <div class="kpi-label">จำนวนรายการ</div>
+            <div class="kpi-value" id="exp-kpi-count">0</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">ยอดก่อน VAT</div>
+            <div class="kpi-value" id="exp-kpi-subtotal">0.00</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">VAT 7%</div>
+            <div class="kpi-value" id="exp-kpi-vat">0.00</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">ยอดสุทธิรวม (THB)</div>
+            <div class="kpi-value" id="exp-kpi-total" style="color: #b45309;">0.00</div>
+          </div>
+        </div>
+
+        <div style="overflow-x: auto;">
+          <table class="expense-table">
+            <thead>
+              <tr>
+                <th>วันที่</th>
+                <th>ร้านค้า / ผู้รับ</th>
+                <th>หมวด</th>
+                <th>ก่อน VAT</th>
+                <th>VAT</th>
+                <th>ยอดรวม</th>
+                <th>วิธีสกัด</th>
+                <th>จัดการ</th>
+              </tr>
+            </thead>
+            <tbody id="expenses-tbody">
+              <tr><td colspan="8" style="text-align: center; color: var(--text-muted); padding: 2rem;">ยังไม่มีรายการรายจ่าย</td></tr>
+            </tbody>
+          </table>
         </div>
       </div>
     </div>
