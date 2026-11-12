@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenThai 2.0 OCR Studio — ระบบอ่านเอกสารภาษาไทยพร้อมฐานข้อมูลในเครื่อง</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+  <!-- Header -->
+  <header>
+    <div class="brand">
+      <div class="brand-icon">TH</div>
+      <div class="brand-info">
+        <h1>OpenThai 2.0 OCR Studio</h1>
+        <p>ขับเคลื่อนด้วยโมเดล OpenThai 2.0 OCR โดย iApp Technology • รันบน CPU และบันทึกลงฐานข้อมูลในเครื่อง 100%</p>
+      </div>
+    </div>
+    <div class="header-badges">
+      <button id="btn-open-db" class="btn btn-secondary btn-sm" style="font-weight: 600; display: flex; align-items: center; gap: 0.35rem; padding: 0.4rem 0.8rem; background: #e0f2fe; color: #0369a1; border-color: #bae6fd;">
+        <span>📚 คลังเอกสารในเครื่อง</span>
+        <span id="db-count-badge" class="badge" style="background: #0284c7; color: white; border: none; padding: 1px 6px; font-size: 11px;">0</span>
+      </button>
+      <div class="badge badge-green">
+        <span class="badge-dot"></span>
+        <span>Local CPU Engine</span>
+      </div>
+      <div class="badge">
+        <span>💾 SQLite (FTS5)</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Grid -->
+  <main>
+    <!-- Left Column: Upload & Viewer -->
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span>📄 ต้นฉบับเอกสาร</span>
+          <span id="file-badge" class="badge" style="display: none; font-size: 11px;"></span>
+        </div>
+        <div class="header-actions">
+          <button id="btn-select-file" class="btn btn-secondary btn-sm">เลือกไฟล์ใหม่</button>
+          <input type="file" id="file-input" accept="image/*,application/pdf" style="display: none;">
+        </div>
+      </div>
+
+      <!-- Dropzone -->
+      <div class="dropzone-container" id="dropzone-area">
+        <div class="dropzone" id="dropzone">
+          <div class="dropzone-icon">📥</div>
+          <div class="dropzone-title">ลากไฟล์เอกสารมาวางที่นี่ หรือคลิกเพื่อเลือกไฟล์</div>
+          <div class="dropzone-sub">รองรับรูปภาพ (PNG, JPG, WebP) และเอกสาร PDF (บันทึกลง Database ให้อัตโนมัติ)</div>
+        </div>
+
+        <div class="samples-bar">
+          <span class="samples-label">ลองเอกสารตัวอย่าง:</span>
+          <button class="btn-sample" data-sample="sample_official_document.png">📝 บันทึกข้อความราชการ & ตาราง</button>
+          <button class="btn-sample" data-sample="sample_budget_table.png">📊 รายงานงบประมาณรายจ่าย</button>
+        </div>
+      </div>
+
+      <!-- PDF Page Bar -->
+      <div class="pdf-controls" id="pdf-controls" style="display: none;">
+        <div>
+          <button class="btn btn-secondary btn-sm" id="btn-prev-page">◀ หน้าก่อน</button>
+          <span id="pdf-page-indicator" style="margin: 0 0.5rem; font-weight: 500;">หน้า 1 / 1</span>
+          <button class="btn btn-secondary btn-sm" id="btn-next-page">หน้าถัดไป ▶</button>
+        </div>
+        <div>
+          <button class="btn btn-primary btn-sm" id="btn-ocr-all-pages">⚡ อ่านทุกหน้าทั้งหมด (Batch)</button>
+        </div>
+      </div>
+
+      <!-- Document Viewer Canvas -->
+      <div class="viewer-container" id="viewer-container">
+        <div class="image-canvas-wrapper" id="canvas-wrapper">
+          <img id="doc-image" src="" alt="เอกสารต้นฉบับ" style="display: none;">
+          <div id="boxes-layer"></div>
+        </div>
+        <div id="viewer-placeholder" style="color: #94a3b8; text-align: center;">
+          <div style="font-size: 3rem; margin-bottom: 0.5rem;">📑</div>
+          <p>ยังไม่มีเอกสาร กรุณาอัปโหลดไฟล์หรือเลือกเอกสารตัวอย่างด้านบน</p>
+        </div>
+
+        <!-- Loading spinner -->
+        <div class="loading-overlay" id="loading-overlay" style="display: none;">
+          <div class="spinner"></div>
+          <div class="loading-text" id="loading-text">กำลังประมวลผล OCR ด้วย OpenThai 2.0...</div>
+        </div>
+      </div>
+
+      <!-- Viewer Controls -->
+      <div class="viewer-controls-bar">
+        <label style="display: flex; align-items: center; gap: 0.35rem; cursor: pointer;">
+          <input type="checkbox" id="toggle-boxes" checked>
+          <span>แสดงกรอบข้อความ (Bounding Boxes)</span>
+        </label>
+        <span id="doc-dimensions" style="color: var(--text-muted); font-size: 11px;"></span>
+      </div>
+    </div>
+
+    <!-- Right Column: OCR Results -->
+    <div class="panel">
+      <!-- Stats Ribbon -->
+      <div class="stats-ribbon">
+        <div class="stat-item">
+          <div class="stat-val" id="stat-time">-</div>
+          <div class="stat-lbl">เวลาที่ใช้</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-val" id="stat-lines">-</div>
+          <div class="stat-lbl">จำนวนบรรทัด</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-val" id="stat-conf">-</div>
+          <div class="stat-lbl">ความแม่นยำเฉลี่ย</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-val" id="stat-db-status">บันทึกแล้ว</div>
+          <div class="stat-lbl">สถานะฐานข้อมูล</div>
+        </div>
+      </div>
+
+      <!-- Tabs Header -->
+      <div class="tabs-header">
+        <button class="tab-btn active" data-tab="tab-text">📝 ข้อความที่อ่านได้</button>
+        <button class="tab-btn" data-tab="tab-lines">📋 ตารางบรรทัด & ค่าความมั่นใจ</button>
+        <button class="tab-btn" data-tab="tab-markdown">📊 รูปแบบ Markdown</button>
+        <button class="tab-btn" data-tab="tab-json">⚙️ JSON</button>
+      </div>
+
+      <!-- Tab: Plain Text -->
+      <div class="tab-content active" id="tab-text">
+        <textarea id="ocr-text-result" class="ocr-textarea" placeholder="ผลลัพธ์ข้อความภาษาไทยที่อ่านได้จะปรากฏที่นี่..."></textarea>
+        <div style="margin-top: 0.5rem; display: flex; justify-content: space-between; font-size: 0.8125rem; color: var(--text-muted);">
+          <span id="char-count">0 ตัวอักษร | 0 คำ</span>
+          <span>💾 จัดเก็บลง SQLite Database พร้อม Full-Text Search ให้โดยอัตโนมัติ</span>
+        </div>
+      </div>
+
+      <!-- Tab: Lines with Confidence -->
+      <div class="tab-content" id="tab-lines">
+        <div style="overflow-y: auto; flex: 1;">
+          <table class="lines-table" id="lines-table">
+            <thead>
+              <tr>
+                <th style="width: 50px;">#</th>
+                <th>ข้อความที่ตรวจพบ</th>
+                <th style="width: 90px;">ความมั่นใจ</th>
+              </tr>
+            </thead>
+            <tbody id="lines-tbody">
+              <tr>
+                <td colspan="3" style="text-align: center; color: var(--text-muted); padding: 2rem;">ไม่มีข้อมูล</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Tab: Markdown -->
+      <div class="tab-content" id="tab-markdown">
+        <textarea id="ocr-markdown-result" class="ocr-textarea" style="font-family: var(--font-mono); font-size: 0.875rem;" placeholder="Markdown..."></textarea>
+      </div>
+
+      <!-- Tab: Raw JSON -->
+      <div class="tab-content" id="tab-json">
+        <textarea id="ocr-json-result" class="ocr-textarea" style="font-family: var(--font-mono); font-size: 0.8125rem;" readonly placeholder="{ ... }"></textarea>
+      </div>
+
+      <!-- Action Footer -->
+      <div class="panel-footer">
+        <div style="font-size: 0.8125rem; color: var(--text-muted);">
+          <span id="footer-doc-id">โมเดล: OpenThai 2.0 OCR Text</span>
+        </div>
+        <div class="action-buttons">
+          <button id="btn-copy" class="btn btn-primary btn-sm">📋 คัดลอกข้อความ</button>
+          <button id="btn-download-txt" class="btn btn-secondary btn-sm">💾 บันทึก .txt</button>
+          <button id="btn-download-json" class="btn btn-secondary btn-sm">📦 บันทึก .json</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Database Modal Drawer -->
+  <div class="modal-backdrop" id="db-modal" style="display: none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <h2 style="font-size: 1.125rem; font-weight: 700;">📚 คลังเอกสารในเครื่อง (Local Database)</h2>
+          <span class="badge badge-green">SQLite FTS5</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <a href="/api/database/download" class="btn btn-secondary btn-sm" download style="text-decoration: none;">📥 ดาวน์โหลดไฟล์ .db</a>
+          <button id="btn-close-db" class="btn btn-secondary btn-sm">✕ ปิด</button>
+        </div>
+      </div>
+
+      <div class="modal-body">
+        <!-- Search bar -->
+        <div style="margin-bottom: 1rem; display: flex; gap: 0.5rem;">
+          <input type="text" id="db-search-input" class="search-input" placeholder="🔍 ค้นหาคำในเอกสารทั้งหมด (เช่น 'งบประมาณ', 'ราชกิจจาฯ', 'อนุมัติ')...">
+          <button id="btn-clear-search" class="btn btn-secondary btn-sm">ล้างคำค้น</button>
+        </div>
+
+        <!-- Database stats bar -->
+        <div id="db-summary-stats" style="font-size: 0.8125rem; color: var(--text-muted); margin-bottom: 1rem;">
+          กำลังโหลดข้อมูลฐานข้อมูล...
+        </div>
+
+        <!-- Documents list -->
+        <div class="docs-list" id="docs-list">
+          <!-- Filled dynamically by JavaScript -->
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification -->
+  <div class="toast" id="toast">
+    <span id="toast-icon">✅</span>
+    <span id="toast-message">คัดลอกข้อความสำเร็จ</span>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
