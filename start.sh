@@ -3,11 +3,12 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$DIR"
 
 echo "=========================================================="
-echo "   🚀 Starting OpenThai 2.0 OCR Studio (Local Engine)    "
+echo "   🚀 Starting OpenThai 2.0 OCR Solo Vault & Expense Hub   "
 echo "=========================================================="
 echo " • Engine: OpenThai 2.0 OCR Text (ONNX CPU, 4.2 MB)"
 echo " • URL:    http://127.0.0.1:8765"
-echo " • Status: 100% Offline & Private (Zero Data Sent to Cloud)"
+echo " • Inbox:  Drop PDF/images into ./data/inbox/ for auto-OCR"
+echo " • Status: Local-first Private Vault (Zero Image Cloud Leak)"
 echo "=========================================================="
 
 # Launch browser after a short delay in background

@@ -889,9 +889,55 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // Preload sample on start
-  setTimeout(() => {
-    const firstSampleBtn = document.querySelector('.btn-sample');
-    if (firstSampleBtn) firstSampleBtn.click();
-  }, 300);
+  // Load latest saved document on startup without re-OCR duplicating samples
+  (async function restoreLatestDocument() {
+    try {
+      const resp = await fetch('/api/documents?limit=1');
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (data.documents && data.documents.length > 0) {
+        const latestId = data.documents[0].id;
+        const detailResp = await fetch(`/api/documents/${latestId}`);
+        if (!detailResp.ok) return;
+        const detail = await detailResp.json();
+        if (detail.success && detail.document) {
+          const doc = detail.document;
+          fileBadge.textContent = doc.filename;
+          fileBadge.style.display = 'inline-flex';
+          const adapted = {
+            success: true,
+            doc_id: doc.id,
+            filename: doc.filename,
+            is_pdf: doc.file_type === 'pdf',
+            total_pages: doc.total_pages,
+            current_page: 1,
+            processed_pages_count: doc.total_pages,
+            text: doc.text,
+            lines: doc.lines || [],
+            image_preview: doc.image_preview,
+            image_width: doc.image_width || 0,
+            image_height: doc.image_height || 0,
+            has_source_file: Boolean(doc.has_source_file),
+            category: doc.category || 'general',
+            tags: doc.tags || [],
+            ingestion_channel: doc.ingestion_channel || 'web_upload',
+            doc_date: doc.doc_date || '',
+            expense: doc.expense || null,
+            stats: {
+              duration_ms: doc.duration_ms || 0,
+              avg_ms_per_page: ((doc.duration_ms || 0) / Math.max(1, doc.total_pages || 1)),
+              total_lines: (doc.lines || []).length,
+              avg_confidence: doc.avg_confidence || 1.0,
+              rotation: 0,
+              text_angle: 0.0
+            }
+          };
+          lastOcrData = adapted;
+          renderResults(adapted);
+        }
+      }
+    } catch (e) {
+      console.error('Startup restore skipped:', e);
+    }
+  })();
 });

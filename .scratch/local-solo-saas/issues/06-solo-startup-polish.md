@@ -4,8 +4,8 @@
 
 **Blocked by:** 03: Watch Folder Auto-Ingestion, 05: Optional Text-Only LLM Hybrid Extraction and Auto-Tag
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Reloading the web UI loads the latest Vault Document (or clean empty state) without inserting duplicate samples
-- [ ] `.env.example`, `start.sh`, and `README.md` accurately reflect Watch Folder, Vault, and Hybrid Expense workflows
-- [ ] Full test suite including real ONNX `LineOCR` smoke test passes
+- [x] Reloading the web UI loads the latest Vault Document (or clean empty state) without inserting duplicate samples
+- [x] `.env.example`, `start.sh`, and `README.md` accurately reflect Watch Folder, Vault, and Hybrid Expense workflows
+- [x] Full test suite including real ONNX `LineOCR` smoke test passes
