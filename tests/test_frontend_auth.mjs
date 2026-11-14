@@ -374,3 +374,91 @@ test('local dev auth_required=false enters workspace without user pill and unkno
   assert.ok(fetchCalls.some((c) => c.url === '/api/system'));
   assert.equal(getEl('auth-error-banner').textContent, 'เข้าสู่ระบบไม่สำเร็จ กรุณาลองใหม่อีกครั้ง');
 });
+
+test('logout network error or 403 keeps user in workspace, shows retry warning, and succeeds on retry', async () => {
+  for (const failureMode of ['network', '403']) {
+    let attempt = 0;
+    const { getEl, body } = runFrontendApp({
+      fetchImpl: async (url) => {
+        if (url === '/api/auth/me') {
+          return jsonResponse(200, {
+            authenticated: true,
+            auth_required: true,
+            oauth_configured: true,
+            csrf_token: 'csrf-retry-1',
+            user: { email: 'cgikchik07@gmail.com', name: 'Owner', picture: '' },
+          });
+        }
+        if (url === '/api/system') {
+          return jsonResponse(200, { database: { pending_reimbursement_total: 120 } });
+        }
+        if (url === '/api/watcher/status') return jsonResponse(200, { inbox_pending_count: 0 });
+        if (url === '/api/auth/logout') {
+          attempt += 1;
+          if (attempt === 1) {
+            if (failureMode === 'network') throw new TypeError('Failed to fetch');
+            return jsonResponse(403, { detail: 'Invalid CSRF token' });
+          }
+          return jsonResponse(200, { success: true });
+        }
+        throw new Error(`Unexpected fetch to ${url}`);
+      },
+    });
+
+    await flushMicrotasks();
+    assert.equal(body.dataset.authState, 'authenticated');
+    assert.equal(getEl('kpi-pending-reimb-val').textContent, '120.00 ฿');
+
+    // First logout attempt fails -> MUST NOT fake logout; MUST warn and allow retry
+    await getEl('btn-logout').click();
+    await flushMicrotasks();
+
+    assert.equal(body.dataset.authState, 'authenticated', `Mode ${failureMode} must stay authenticated`);
+    assert.equal(getEl('auth-gate').hidden, true);
+    assert.equal(getEl('auth-user-pill').hidden, false);
+    assert.equal(getEl('btn-logout').disabled, false);
+    assert.equal(getEl('kpi-pending-reimb-val').textContent, '120.00 ฿');
+    assert.equal(getEl('toast').classList.contains('show'), true);
+    assert.match(getEl('toast-message').textContent, /ยังออกจากระบบไม่สำเร็จ/);
+    assert.match(getEl('toast-message').textContent, /ลองใหม่อีกครั้ง/);
+
+    // Second logout attempt succeeds -> revokes & clears workspace
+    await getEl('btn-logout').click();
+    await flushMicrotasks();
+
+    assert.equal(attempt, 2);
+    assert.equal(body.dataset.authState, 'unauthenticated');
+    assert.equal(getEl('auth-gate').hidden, false);
+    assert.equal(getEl('auth-user-pill').hidden, true);
+    assert.equal(getEl('kpi-pending-reimb-val').textContent, '0.00 ฿');
+  }
+});
+
+test('logout returning 401 switches to auth-gate and preserves session-expired notice', async () => {
+  const { getEl, body } = runFrontendApp({
+    fetchImpl: async (url) => {
+      if (url === '/api/auth/me') {
+        return jsonResponse(200, {
+          authenticated: true,
+          auth_required: true,
+          oauth_configured: true,
+          csrf_token: 'csrf-401-logout',
+          user: { email: 'ppksaruenee@gmail.com', name: 'Teacher', picture: '' },
+        });
+      }
+      if (url === '/api/system') return jsonResponse(200, { database: {} });
+      if (url === '/api/watcher/status') return jsonResponse(200, { inbox_pending_count: 0 });
+      if (url === '/api/auth/logout') return jsonResponse(401, { detail: 'Session expired' });
+      throw new Error(`Unexpected fetch to ${url}`);
+    },
+  });
+
+  await flushMicrotasks();
+  await getEl('btn-logout').click();
+  await flushMicrotasks();
+
+  assert.equal(body.dataset.authState, 'unauthenticated');
+  assert.equal(getEl('auth-gate').hidden, false);
+  assert.equal(getEl('auth-error-banner').hidden, false);
+  assert.match(getEl('auth-error-banner').textContent, /เซสชันหมดอายุ/);
+});

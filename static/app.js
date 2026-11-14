@@ -257,7 +257,7 @@
   }
 
   let toastTimer = null;
-  function showToast(message, icon = '✅') {
+  function showToast(message, icon = '✅', durationMs = 3200) {
     if (!els.toast) return;
     els.toastIcon.textContent = icon;
     els.toastMessage.textContent = message;
@@ -265,7 +265,7 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => {
       els.toast.classList.remove('show');
-    }, 3200);
+    }, durationMs);
   }
 
   function showLoading(show, text = 'น้องโชคกำลังช่วยอ่านเอกสารให้นะครับ...') {
@@ -433,13 +433,20 @@
   }
 
   async function handleLogout() {
+    if (els.btnLogout) els.btnLogout.disabled = true;
     try {
       await apiFetch('/api/auth/logout', { method: 'POST' });
-    } catch (_) {
-      // Clear local workspace state even if the server session already expired
-    } finally {
       showUnauthenticatedGate();
       showAuthErrorBanner('');
+    } catch (err) {
+      if (err && err.status === 401) {
+        // apiFetch already cleared workspace data and displayed the expired-session notice.
+        return;
+      }
+      // Keep the authenticated UI active when revocation cannot be confirmed so the user can retry.
+      showToast('ยังออกจากระบบไม่สำเร็จ กรุณาลองใหม่อีกครั้ง', '❌', 6000);
+    } finally {
+      if (els.btnLogout) els.btnLogout.disabled = false;
     }
   }
 
@@ -467,7 +474,9 @@
     });
     if (res.status === 401 && url !== '/api/auth/me') {
       showUnauthenticatedGate('เซสชันหมดอายุแล้ว กรุณาเข้าสู่ระบบด้วย Google ใหม่อีกครั้ง');
-      throw new Error('กรุณาเข้าสู่ระบบใหม่อีกครั้ง');
+      const err = new Error('กรุณาเข้าสู่ระบบใหม่อีกครั้ง');
+      err.status = 401;
+      throw err;
     }
 
     const contentType = res.headers.get('content-type') || '';
@@ -479,7 +488,9 @@
       data = { detail: txt };
     }
     if (!res.ok) {
-      throw new Error(data.detail || data.error || `HTTP ${res.status}`);
+      const err = new Error(data.detail || data.error || `HTTP ${res.status}`);
+      err.status = res.status;
+      throw err;
     }
     return data;
   }
