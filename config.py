@@ -57,6 +57,7 @@ class AppConfig:
     line_channel_secret: str = ""
     line_channel_access_token: str = ""
     public_base_url: str = ""
+    teacher_name: str = "ครูพิ้งกี้"
 
     @classmethod
     def from_dir(cls, data_dir: str, **overrides: object) -> "AppConfig":
@@ -98,6 +99,7 @@ class AppConfig:
             line_channel_secret=(os.environ.get("LINE_CHANNEL_SECRET") or "").strip(),
             line_channel_access_token=(os.environ.get("LINE_CHANNEL_ACCESS_TOKEN") or "").strip(),
             public_base_url=(os.environ.get("PUBLIC_BASE_URL") or "").strip().rstrip("/"),
+            teacher_name=(os.environ.get("TEACHER_NAME") or "ครูพิ้งกี้").strip() or "ครูพิ้งกี้",
         )
 
     def ensure_dirs(self) -> None:

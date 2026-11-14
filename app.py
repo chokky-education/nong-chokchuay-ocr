@@ -125,6 +125,7 @@ def create_app(
         db_stats = database.get_db_stats(db_path=cfg.db_path)
         return {
             "brand": "น้องโชคช่วย (Nong ChokChuay)",
+            "teacher_name": cfg.teacher_name,
             "engine": "OpenThai 2.0 OCR Text (Local ONNX)",
             "model_architecture": "PaddlePaddle PP-OCRv6-tiny Detector + Thai CTC Recognizer",
             "parameters": "1.02M (det: 428K, rec: 587K)",
@@ -134,6 +135,7 @@ def create_app(
             "auto_extract_on_ingest": cfg.auto_extract_on_ingest,
             "llm_configured": extractor.is_llm_configured(cfg),
             "llm_provider": cfg.llm_provider if extractor.is_llm_configured(cfg) else None,
+            "llm_model": cfg.llm_model if extractor.is_llm_configured(cfg) else None,
             "line_oa_configured": bool(cfg.line_channel_secret and cfg.line_channel_access_token),
             "license": "Apache-2.0",
             "database": {
@@ -588,6 +590,8 @@ def create_app(
                         msg.get("text", ""),
                         db_path=cfg.db_path,
                         public_base_url=cfg.public_base_url,
+                        config=cfg,
+                        teacher_name=cfg.teacher_name,
                     )
                 elif mtype in ("image", "file"):
                     msg_id = msg.get("id", "")
@@ -616,22 +620,32 @@ def create_app(
                                 expense=ocr_res.get("expense"),
                                 student=ocr_res.get("student"),
                                 public_base_url=cfg.public_base_url,
+                                config=cfg,
+                                teacher_name=cfg.teacher_name,
                             )
                         except Exception as exc:
-                            reply_text = f"น้องโชคเปิดไฟล์นี้ไม่ได้ครับคุณครู ({exc})"
+                            reply_text = f"น้องโชคเปิดไฟล์นี้ไม่ได้ครับ{cfg.teacher_name} ({exc})"
                             reply_obj = {
                                 "reply_text": reply_text,
                                 "line_messages": [{"type": "text", "text": reply_text}],
                             }
                     else:
-                        reply_text = "น้องโชคได้รับข้อความไฟล์แล้วครับ แต่ยังไม่ได้ตั้งค่า LINE_CHANNEL_ACCESS_TOKEN ครับคุณครู"
+                        reply_text = (
+                            f"น้องโชคได้รับข้อความไฟล์แล้วครับ{cfg.teacher_name} "
+                            "แต่ยังไม่ได้ตั้งค่า LINE_CHANNEL_ACCESS_TOKEN ครับ"
+                        )
                         reply_obj = {
                             "reply_text": reply_text,
                             "line_messages": [{"type": "text", "text": reply_text}],
                         }
             elif etype == "postback":
                 pb_data = (event.get("postback") or {}).get("data", "")
-                reply_obj = line_service.handle_line_postback(pb_data, db_path=cfg.db_path)
+                reply_obj = line_service.handle_line_postback(
+                    pb_data,
+                    db_path=cfg.db_path,
+                    config=cfg,
+                    teacher_name=cfg.teacher_name,
+                )
 
             if reply_obj:
                 if reply_token and cfg.line_channel_access_token:
@@ -654,7 +668,12 @@ def create_app(
         file: Optional[UploadFile] = File(None),
     ):
         if postback_data.strip():
-            res = line_service.handle_line_postback(postback_data.strip(), db_path=cfg.db_path)
+            res = line_service.handle_line_postback(
+                postback_data.strip(),
+                db_path=cfg.db_path,
+                config=cfg,
+                teacher_name=cfg.teacher_name,
+            )
             return JSONResponse({"mode": "postback", **res})
 
         if file is not None:
@@ -677,6 +696,8 @@ def create_app(
                 expense=ocr_res.get("expense"),
                 student=ocr_res.get("student"),
                 public_base_url=cfg.public_base_url,
+                config=cfg,
+                teacher_name=cfg.teacher_name,
             )
             return JSONResponse({
                 "success": True,
@@ -686,7 +707,11 @@ def create_app(
             })
 
         res = line_service.process_line_text_command(
-            text, db_path=cfg.db_path, public_base_url=cfg.public_base_url
+            text,
+            db_path=cfg.db_path,
+            public_base_url=cfg.public_base_url,
+            config=cfg,
+            teacher_name=cfg.teacher_name,
         )
         return JSONResponse({"success": True, "mode": "text", **res})
 

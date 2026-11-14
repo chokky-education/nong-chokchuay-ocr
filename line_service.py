@@ -7,6 +7,9 @@ from urllib.parse import parse_qs
 import requests
 
 import database
+from config import AppConfig
+
+DEFAULT_TEACHER_NAME = "ครูพิ้งกี้"
 
 _REIMBURSEMENT_LABELS = {
     "pending_reimbursement": "รอเบิกคืนโรงเรียน",
@@ -23,6 +26,148 @@ _EXPENSE_CATEGORY_LABELS = {
     "office": "เครื่องเขียน / สำนักงาน",
     "other": "อื่นๆ",
 }
+
+
+def _resolve_teacher_name(
+    config: Optional[AppConfig] = None,
+    teacher_name: Optional[str] = None,
+) -> str:
+    candidate = (teacher_name or "").strip()
+    if candidate:
+        return candidate
+    if config is not None and (getattr(config, "teacher_name", "") or "").strip():
+        return config.teacher_name.strip()
+    return DEFAULT_TEACHER_NAME
+
+
+def build_nong_chok_system_instruction(teacher_name: str = DEFAULT_TEACHER_NAME) -> str:
+    """Build Gemini Flash systemInstruction ensuring Nong Chok addresses the teacher by name."""
+    target = (teacher_name or DEFAULT_TEACHER_NAME).strip() or DEFAULT_TEACHER_NAME
+    return (
+        f'คุณคือ "น้องโชคช่วย" (แทนตัวเองว่า "น้องโชค" เสมอ) ผู้ช่วยส่วนตัวแสนอบอุ่น ฉลาด รอบคอบ และสุภาพ '
+        f'ประจำห้องเรียนอนุบาลของ "{target}"\n'
+        f"กฎสำคัญที่สุด:\n"
+        f'1. ในทุกข้อความที่ตอบกลับ ต้องเรียกชื่อคุณครูว่า "{target}" เสมอ (เช่น "สวัสดีครับ{target}", "ได้เลยครับ{target}") '
+        f'ห้ามเรียกแค่ "คุณครู" โดยไม่มีคำว่า "{target}"\n'
+        f'2. ใช้คำลงท้ายสุภาพว่า "ครับ" และน้ำเสียงเป็นกันเอง คอยช่วยเหลือและให้กำลังใจ\n'
+        f"3. ตอบคำถาม สรุปเอกสาร ยอดเงินสำรองจ่ายรอเบิกคืน และข้อมูลเด็กแพ้อาหารโดยอ้างอิงจาก CONTEXT ของระบบเท่านั้น "
+        f"ห้ามแต่งตัวเลข ชื่อเด็ก หรือชื่อเอกสารขึ้นมาเอง หากใน CONTEXT ยังไม่มีข้อมูลให้แจ้ง{target}ตรงๆ อย่างสุภาพ\n"
+        f"4. ตอบให้กระชับ อ่านง่ายบนหน้าจอมือถือ LINE ไม่เกิน 4-6 บรรทัด"
+    )
+
+
+def _build_teacher_db_context(db_path: str, search_query: str = "") -> str:
+    """Collect live Vault, Expense Reimbursement, and Kindergarten Student summary for Gemini context."""
+    stats = database.get_db_stats(db_path=db_path)
+    exp_data = database.list_expenses(db_path=db_path)
+    exp_sum = exp_data["summary"]
+    stu_data = database.list_students(db_path=db_path)
+    students = stu_data["students"]
+    pending_docs = database.search_documents(review_status="pending_review", limit=5, db_path=db_path)
+
+    lines = [
+        f"- เอกสารทั้งหมดในตู้เซฟ: {stats['total_documents']} ฉบับ (รอตรวจยืนยัน: {stats['pending_review_count']} ฉบับ)",
+        f"- ยอดเงินสำรองจ่ายรอเบิกคืนโรงเรียน: {exp_sum['pending_reimbursement_total']:,.2f} บาท ({exp_sum['pending_reimbursement_count']} ใบ)",
+        f"- ยอดที่เบิกคืนแล้ว: {exp_sum['reimbursed_total']:,.2f} บาท",
+        f"- นักเรียนในแฟ้ม: {stu_data['summary']['total_students']} คน (แพ้อาหาร/ระวังพิเศษ: {stu_data['summary']['allergy_count']} คน)",
+    ]
+
+    if pending_docs:
+        lines.append("เอกสารรอตรวจล่าสุด:")
+        for doc in pending_docs[:5]:
+            lines.append(f"  * {doc['filename']} (หมวด {doc['category']})")
+
+    allergy_students = [s for s in students if s.get("allergies") or s.get("medical_notes")]
+    if allergy_students:
+        lines.append("รายชื่อเด็กที่ต้องระวังแพ้อาหาร/สุขภาพ:")
+        for stu in allergy_students[:8]:
+            nick = f" ({stu['nickname']})" if stu.get("nickname") else ""
+            warn = " / ".join(p for p in (stu.get("allergies"), stu.get("medical_notes")) if p)
+            phone = f" โทร {stu['parent_phone']}" if stu.get("parent_phone") else ""
+            lines.append(f"  * {stu['full_name']}{nick} [{stu['classroom']}]: {warn}{phone}")
+
+    clean_q = (search_query or "").strip()
+    if clean_q and len(clean_q) >= 2:
+        matched_docs = database.search_documents(query=clean_q, limit=3, db_path=db_path)
+        if matched_docs:
+            lines.append(f'ผลการค้นหาเอกสารสำหรับ "{clean_q}":')
+            for d in matched_docs:
+                snippet = (d.get("snippet") or "").replace("\n", " ")[:90]
+                lines.append(f"  * {d['filename']}: {snippet}")
+
+    return "\n".join(lines)
+
+
+def generate_nong_chok_ai_reply(
+    user_text: str,
+    db_context: str,
+    config: Optional[AppConfig] = None,
+    teacher_name: Optional[str] = None,
+) -> Optional[str]:
+    """Generate a warm Gemini Flash reply using Nong Chok's systemInstruction."""
+    if config is None:
+        return None
+    provider = (config.llm_provider or "gemini").strip().lower()
+    api_key = (config.llm_api_key or "").strip()
+    if not api_key and not (provider != "gemini" and (config.llm_base_url or "").strip()):
+        return None
+
+    target_teacher = _resolve_teacher_name(config, teacher_name)
+    system_instruction = build_nong_chok_system_instruction(target_teacher)
+    user_prompt = f"CONTEXT:\n{db_context}\n\nUSER_MESSAGE:\n{user_text}"
+
+    try:
+        if provider == "gemini":
+            base = (config.llm_base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+            model = (config.llm_model or "gemini-2.5-flash").strip()
+            url = f"{base}/models/{model}:generateContent"
+            resp = requests.post(
+                url,
+                headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+                json={
+                    "systemInstruction": {"parts": [{"text": system_instruction}]},
+                    "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+                    "generationConfig": {
+                        "temperature": 0.35,
+                        "maxOutputTokens": 450,
+                    },
+                },
+                timeout=12,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            reply = payload["candidates"][0]["content"]["parts"][0]["text"].strip()
+        else:
+            base = (config.llm_base_url or "https://api.openai.com/v1").rstrip("/")
+            url = f"{base}/chat/completions"
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            resp = requests.post(
+                url,
+                headers=headers,
+                json={
+                    "model": (config.llm_model or "gpt-4o-mini").strip(),
+                    "temperature": 0.35,
+                    "messages": [
+                        {"role": "system", "content": system_instruction},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                },
+                timeout=12,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            reply = payload["choices"][0]["message"]["content"].strip()
+    except Exception as exc:
+        print(f"[LINE AI] Gemini/LLM chat reply fallback: {exc}")
+        return None
+
+    if not reply:
+        return None
+    if target_teacher not in reply:
+        reply = f"สวัสดีครับ{target_teacher}!\n{reply}"
+    return reply[:1800]
 
 
 def verify_line_signature(body: bytes, signature: str, channel_secret: str) -> bool:
@@ -78,8 +223,11 @@ def build_nong_chok_reply_summary(
     expense: Optional[Dict[str, Any]] = None,
     student: Optional[Dict[str, Any]] = None,
     public_base_url: str = "",
+    config: Optional[AppConfig] = None,
+    teacher_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build Nong Chok's warm reply text, LINE Flex Message, and interactive postback actions."""
+    target_teacher = _resolve_teacher_name(config, teacher_name)
     doc_id = doc.get("doc_id") or doc.get("id") or ""
     filename = doc.get("filename") or "เอกสารใหม่"
     base_url = (public_base_url or "").rstrip("/")
@@ -101,7 +249,7 @@ def build_nong_chok_reply_summary(
         reimb_label = _REIMBURSEMENT_LABELS.get(reimb_status, "รอเบิกคืนโรงเรียน")
         exp_date = expense.get("expense_date") or "ไม่ระบุวันที่"
 
-        header_title = "🧾 น้องโชคช่วยจดบิลให้แล้วครับคุณครู!"
+        header_title = f"🧾 น้องโชคช่วยจดบิลให้{target_teacher}แล้วครับ!"
         body_lines = [
             f"ร้านค้า: {merchant}",
             f"ยอดรวม: {total:,.2f} บาท",
@@ -110,11 +258,11 @@ def build_nong_chok_reply_summary(
             f"สถานะ: {reimb_label}",
         ]
         reply_text = (
-            f"น้องโชคช่วยอ่านบิลให้เรียบร้อยแล้วครับคุณครู 🌤️\n"
+            f"น้องโชคช่วยอ่านบิลให้เรียบร้อยแล้วครับ{target_teacher} 🌤️\n"
             f"• ร้านค้า: {merchant}\n"
             f"• ยอดรวม: {total:,.2f} บาท ({cat_label})\n"
             f"• สถานะ: {reimb_label}\n"
-            f"คุณครูกดยืนยันด้านล่าง หรือเปิดแก้บนโต๊ะทำงานได้เลยนะครับ"
+            f"{target_teacher}กดยืนยันด้านล่าง หรือเปิดแก้บนโต๊ะทำงานได้เลยนะครับ"
         )
         if reimb_status == "pending_reimbursement":
             actions.append(
@@ -132,7 +280,7 @@ def build_nong_chok_reply_summary(
         allergy = student.get("allergies") or "ไม่มีระบุ"
         phone = student.get("parent_phone") or "-"
 
-        header_title = "👶 น้องโชคบันทึกข้อมูลเด็กให้แล้วครับ!"
+        header_title = f"👶 น้องโชคบันทึกข้อมูลเด็กให้{target_teacher}แล้วครับ!"
         body_lines = [
             f"ชื่อเด็ก: {stu_name}{nick}",
             f"ห้องเรียน: {classroom}",
@@ -140,22 +288,22 @@ def build_nong_chok_reply_summary(
             f"แพ้อาหาร: {allergy}",
         ]
         reply_text = (
-            f"น้องโชคช่วยเก็บประวัติ {stu_name}{nick} เข้าแฟ้มห้องเรียนแล้วครับ 🎒\n"
+            f"น้องโชคช่วยเก็บประวัติ {stu_name}{nick} ให้{target_teacher}เข้าแฟ้มห้องเรียนแล้วครับ 🎒\n"
             f"• ห้อง: {classroom}\n"
             f"• เบอร์ผู้ปกครอง: {phone}\n"
             f"• แพ้อาหาร/ระวังพิเศษ: {allergy}"
         )
     else:
         snippet = (doc.get("text") or "").strip().replace("\n", " ")[:90]
-        header_title = "📂 น้องโชคเก็บเข้าตู้เซฟเอกสารแล้วครับ!"
+        header_title = f"📂 น้องโชคเก็บเข้าตู้เซฟให้{target_teacher}แล้วครับ!"
         body_lines = [
             f"ไฟล์: {filename}",
             f"หมวดหมู่: {doc.get('category') or 'general'}",
             f"ตัวอย่างข้อความ: {snippet or 'อ่านข้อความครบแล้ว'}",
         ]
         reply_text = (
-            f"น้องโชคเก็บไฟล์ \"{filename}\" เข้าตู้เซฟเอกสารโรงเรียนให้แล้วครับ 📂\n"
-            f"ต่อไปพิมพ์คำค้นหาในแชทนี้เพื่อเรียกดูได้ตลอดเลย ไม่ต้องกลัวไฟล์หมดอายุครับคุณครู!"
+            f'น้องโชคเก็บไฟล์ "{filename}" เข้าตู้เซฟเอกสารให้{target_teacher}แล้วครับ 📂\n'
+            f"ต่อไป{target_teacher}พิมพ์คำค้นหาในแชทนี้เพื่อเรียกดูได้ตลอดเลย ไม่ต้องกลัวไฟล์หมดอายุครับ!"
         )
 
     actions.append(
@@ -194,7 +342,6 @@ def build_nong_chok_reply_summary(
                 }
             )
 
-    # Clean None color fields for LINE API compliance
     for btn in flex_buttons:
         if btn.get("color") is None:
             btn.pop("color", None)
@@ -257,27 +404,16 @@ def process_line_text_command(
     text: str,
     db_path: str,
     public_base_url: str = "",
+    config: Optional[AppConfig] = None,
+    teacher_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Process teacher chat text commands or search queries sent to Nong ChokChuay LINE OA."""
+    """Process teacher chat text commands, Gemini Flash assistant chat, or vault searches."""
+    target_teacher = _resolve_teacher_name(config, teacher_name)
     clean = (text or "").strip()
     lower = clean.lower()
 
-    if not clean or any(kw in lower for kw in ("สวัสดี", "ช่วยด้วย", "เมนู", "help", "menu")):
-        reply_text = (
-            "สวัสดีครับคุณครู! น้องโชคช่วยพร้อมดูแลเอกสารให้แล้วครับ 🌤️\n"
-            "• ส่งรูปใบเสร็จ / สลิป -> น้องโชคช่วยจดยอดรอเบิกให้\n"
-            "• ส่งรูปสูติบัตร / ใบสมัครเด็ก -> เก็บชื่อ เลข 13 หลัก และป้ายเตือนแพ้อาหาร\n"
-            "• ส่ง PDF คำสั่งโรงเรียน -> เก็บเข้าตู้เซฟค้นหาได้ตลอด\n"
-            "• พิมพ์ \"ยอดรอเบิก\", \"แพ้อาหาร\", หรือพิมพ์คำที่ต้องการค้นหาได้เลยครับ"
-        )
-        return {
-            "intent": "help",
-            "reply_text": reply_text,
-            "line_messages": [{"type": "text", "text": reply_text}],
-            "actions": [],
-        }
-
-    if any(kw in lower for kw in ("ยอดรอเบิก", "สรุปยอด", "เบิกเงิน", "ค่าใช้จ่าย")):
+    # Exact short command shortcuts for instant zero-latency Rich Menu & ledger queries
+    if lower in {"ยอดรอเบิก", "สรุปยอด", "เบิกเงิน", "ค่าใช้จ่าย"}:
         exp_data = database.list_expenses(db_path=db_path)
         summary = exp_data["summary"]
         stats = database.get_db_stats(db_path=db_path)
@@ -286,10 +422,10 @@ def process_line_text_command(
         reimb_total = summary["reimbursed_total"]
         pending_docs = stats["pending_review_count"]
         reply_text = (
-            f"💸 สรุปยอดเงินของคุณครูตอนนี้ครับ:\n"
+            f"💸 สรุปยอดเงินของ{target_teacher}ตอนนี้ครับ:\n"
             f"• รอเบิกคืนโรงเรียน: {pending_total:,.2f} บาท ({pending_cnt} ใบ)\n"
             f"• เบิกคืนแล้ว: {reimb_total:,.2f} บาท\n"
-            f"• เอกสารรอคุณครูกดตรวจ: {pending_docs} ฉบับ"
+            f"• เอกสารรอ{target_teacher}กดตรวจ: {pending_docs} ฉบับ"
         )
         return {
             "intent": "reimbursement_summary",
@@ -299,12 +435,13 @@ def process_line_text_command(
             "actions": [],
         }
 
-    if any(kw in lower for kw in ("แพ้อาหาร", "รายชื่อเด็ก", "ข้อมูลเด็ก", "เด็กในห้อง")):
+    if lower in {"แพ้อาหาร", "รายชื่อเด็ก", "ข้อมูลเด็ก", "เด็กในห้อง"}:
         stu_data = database.list_students(db_path=db_path)
         all_students = stu_data["students"]
         allergy_students = [s for s in all_students if s.get("allergies") or s.get("medical_notes")]
         lines = [
-            f"👶 แฟ้มเด็กอนุบาลตอนนี้มี {stu_data['summary']['total_students']} คนครับ (ต้องระวังแพ้อาหาร/สุขภาพ {len(allergy_students)} คน)"
+            f"👶 แฟ้มเด็กอนุบาลของ{target_teacher}ตอนนี้มี {stu_data['summary']['total_students']} คนครับ "
+            f"(ต้องระวังแพ้อาหาร/สุขภาพ {len(allergy_students)} คน)"
         ]
         for stu in allergy_students[:5]:
             nick = f" ({stu['nickname']})" if stu.get("nickname") else ""
@@ -324,12 +461,12 @@ def process_line_text_command(
             "actions": [],
         }
 
-    if any(kw in lower for kw in ("รอตรวจ", "ค้างตรวจ")):
+    if lower in {"รอตรวจ", "ค้างตรวจ"}:
         pending = database.search_documents(review_status="pending_review", limit=5, db_path=db_path)
         if not pending:
-            reply_text = "เย้! ไม่มีเอกสารค้างตรวจแล้วครับคุณครู ไปพักผ่อนได้เลยครับ ✨"
+            reply_text = f"เย้! ไม่มีเอกสารค้างตรวจแล้วครับ{target_teacher} พักผ่อนได้เลยนะครับ ✨"
         else:
-            lines = [f"📥 มีเอกสารรอคุณครูตรวจยืนยัน {len(pending)} รายการล่าสุดครับ:"]
+            lines = [f"📥 มีเอกสารรอ{target_teacher}ตรวจยืนยัน {len(pending)} รายการล่าสุดครับ:"]
             for d in pending:
                 lines.append(f"• {d['filename']} ({d['category']})")
             reply_text = "\n".join(lines)
@@ -337,6 +474,39 @@ def process_line_text_command(
             "intent": "pending_review_list",
             "reply_text": reply_text,
             "documents": pending,
+            "line_messages": [{"type": "text", "text": reply_text}],
+            "actions": [],
+        }
+
+    # Explicit search prefix goes directly to FTS5 + student roster lookup
+    is_explicit_search = lower.startswith(("ค้นหา ", "หา ", "search "))
+    if not is_explicit_search:
+        ai_reply = generate_nong_chok_ai_reply(
+            user_text=clean or "สวัสดี",
+            db_context=_build_teacher_db_context(db_path=db_path, search_query=clean),
+            config=config,
+            teacher_name=target_teacher,
+        )
+        if ai_reply:
+            return {
+                "intent": "ai_chat",
+                "model": config.llm_model if config else "gemini-2.5-flash",
+                "reply_text": ai_reply,
+                "line_messages": [{"type": "text", "text": ai_reply}],
+                "actions": [],
+            }
+
+    if not clean or any(kw in lower for kw in ("สวัสดี", "ช่วยด้วย", "เมนู", "help", "menu")):
+        reply_text = (
+            f"สวัสดีครับ{target_teacher}! น้องโชคช่วยพร้อมดูแลเอกสารให้แล้วครับ 🌤️\n"
+            "• ส่งรูปใบเสร็จ / สลิป -> น้องโชคช่วยจดยอดรอเบิกให้\n"
+            "• ส่งรูปสูติบัตร / ใบสมัครเด็ก -> เก็บชื่อ เลข 13 หลัก และป้ายเตือนแพ้อาหาร\n"
+            "• ส่ง PDF คำสั่งโรงเรียน -> เก็บเข้าตู้เซฟค้นหาได้ตลอด\n"
+            '• พิมพ์ "ยอดรอเบิก", "แพ้อาหาร", หรือพิมพ์คุย/ค้นหาได้เลยครับ'
+        )
+        return {
+            "intent": "help",
+            "reply_text": reply_text,
             "line_messages": [{"type": "text", "text": reply_text}],
             "actions": [],
         }
@@ -352,12 +522,17 @@ def process_line_text_command(
     stus = database.list_students(query=search_term, db_path=db_path)["students"][:3]
 
     if not docs and not stus:
-        reply_text = f"น้องโชคลองค้นคำว่า \"{search_term}\" ในตู้เซฟและแฟ้มเด็กแล้ว ยังไม่พบข้อมูลครับคุณครู 🔍"
+        reply_text = (
+            f'น้องโชคลองค้นคำว่า "{search_term}" ในตู้เซฟและแฟ้มเด็กให้{target_teacher}แล้ว '
+            "ยังไม่พบข้อมูลครับ 🔍"
+        )
     else:
-        lines = [f"🔍 น้องโชคค้นคำว่า \"{search_term}\" เจอข้อมูลตามนี้ครับ:"]
+        lines = [f'🔍 น้องโชคค้นคำว่า "{search_term}" เจอข้อมูลให้{target_teacher}ตามนี้ครับ:']
         for stu in stus:
             nick = f" ({stu['nickname']})" if stu.get("nickname") else ""
             lines.append(f"👶 {stu['full_name']}{nick} [{stu['classroom']}] โทร {stu.get('parent_phone') or '-'}")
+            if stu.get("allergies"):
+                lines.append(f"   ⚠️ แพ้อาหาร: {stu['allergies']}")
         for doc in docs:
             snippet = (doc.get("snippet") or "").replace("\n", " ")[:70]
             lines.append(f"📄 {doc['filename']}: {snippet}...")
@@ -374,14 +549,20 @@ def process_line_text_command(
     }
 
 
-def handle_line_postback(data_str: str, db_path: str) -> Dict[str, Any]:
+def handle_line_postback(
+    data_str: str,
+    db_path: str,
+    config: Optional[AppConfig] = None,
+    teacher_name: Optional[str] = None,
+) -> Dict[str, Any]:
     """Handle LINE Postback / simulator button clicks such as confirm_review or mark_reimbursed."""
+    target_teacher = _resolve_teacher_name(config, teacher_name)
     parsed = parse_qs(data_str or "")
     action = (parsed.get("action") or [""])[0].strip()
     doc_id = (parsed.get("doc_id") or [""])[0].strip()
 
     if not doc_id:
-        reply_text = "น้องโชคไม่พบรหัสเอกสารสำหรับทำรายการนี้ครับคุณครู"
+        reply_text = f"น้องโชคไม่พบรหัสเอกสารสำหรับทำรายการนี้ครับ{target_teacher}"
         return {
             "success": False,
             "reply_text": reply_text,
@@ -390,7 +571,7 @@ def handle_line_postback(data_str: str, db_path: str) -> Dict[str, Any]:
 
     doc = database.get_document_by_id(doc_id, db_path=db_path)
     if not doc:
-        reply_text = "ไม่พบเอกสารนี้ในฐานข้อมูลแล้วครับคุณครู"
+        reply_text = f"ไม่พบเอกสารนี้ในฐานข้อมูลแล้วครับ{target_teacher}"
         return {
             "success": False,
             "reply_text": reply_text,
@@ -403,7 +584,7 @@ def handle_line_postback(data_str: str, db_path: str) -> Dict[str, Any]:
             review_status="reviewed",
             db_path=db_path,
         )
-        reply_text = f"✅ น้องโชคยืนยันตรวจเอกสาร \"{doc['filename']}\" เรียบร้อยแล้วครับคุณครู!"
+        reply_text = f'✅ น้องโชคยืนยันตรวจเอกสาร "{doc["filename"]}" เรียบร้อยแล้วครับ{target_teacher}!'
         return {
             "success": True,
             "action": action,
@@ -433,7 +614,7 @@ def handle_line_postback(data_str: str, db_path: str) -> Dict[str, Any]:
             )
             reply_text = (
                 f"💸 บันทึกว่าเบิกเงินคืนจากโรงเรียนแล้ว ({updated_exp['total_amount']:,.2f} บาท) "
-                f"สำหรับบิล {updated_exp['merchant'] or doc['filename']} ครับคุณครู!"
+                f"สำหรับบิล {updated_exp['merchant'] or doc['filename']} ครับ{target_teacher}!"
             )
             return {
                 "success": True,
@@ -443,7 +624,7 @@ def handle_line_postback(data_str: str, db_path: str) -> Dict[str, Any]:
                 "line_messages": [{"type": "text", "text": reply_text}],
             }
 
-    reply_text = f"น้องโชคได้รับคำสั่ง ({action}) แล้วครับคุณครู"
+    reply_text = f"น้องโชคได้รับคำสั่ง ({action}) แล้วครับ{target_teacher}"
     return {
         "success": True,
         "action": action,

@@ -588,13 +588,14 @@
           : '⚙️ อ่านออฟไลน์ในเครื่อง';
 
         if (els.nongChokSpeech) {
+          const tName = sys.teacher_name || 'ครูพิ้งกี้';
           const notes = [];
-          if (pendingReview > 0) notes.push(`มีเอกสารรอคุณครูตรวจ ${pendingReview} ฉบับ`);
+          if (pendingReview > 0) notes.push(`มีเอกสารรอ${tName}ตรวจ ${pendingReview} ฉบับ`);
           if (pendingReimb > 0) notes.push(`ยอดสำรองจ่ายรอเบิกคืน ${formatMoney(pendingReimb)} บาท`);
           if (allergyCount > 0) notes.push(`ดูแลเด็กแพ้อาหารอยู่ ${allergyCount} คน`);
           els.nongChokSpeech.textContent = notes.length
-            ? `สวัสดีครับคุณครู! ตอนนี้ ${notes.join(' • ')} กดที่การ์ดด้านขวาเพื่อดูรายละเอียดได้เลยนะครับ`
-            : 'สวัสดีครับคุณครู! โยนรูปบิล รูปเอกสารเด็ก หรือ PDF คำสั่งโรงเรียนเข้ามาได้เลยนะครับ เดี๋ยวน้องโชคช่วยจัดระเบียบให้เองครับ';
+            ? `สวัสดีครับ${tName}! ตอนนี้ ${notes.join(' • ')} กดที่การ์ดด้านขวาเพื่อดูรายละเอียดได้เลยนะครับ`
+            : `สวัสดีครับ${tName}! โยนรูปบิล รูปเอกสารเด็ก หรือ PDF คำสั่งโรงเรียนเข้ามาได้เลยนะครับ เดี๋ยวน้องโชคช่วยจัดระเบียบให้เองครับ`;
         }
       }
 

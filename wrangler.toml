@@ -24,6 +24,9 @@ new_sqlite_classes = ["NongChokChuayOCR"]
 [vars]
 AUTO_EXTRACT_ON_INGEST = "true"
 PUBLIC_BASE_URL = "https://nong-chokchuay-ocr.entrace-space.workers.dev"
+LLM_PROVIDER = "gemini"
+LLM_MODEL = "gemini-2.5-flash"
+TEACHER_NAME = "ครูพิ้งกี้"
 
 # Secrets to configure via Wrangler CLI before deploying:
 #   npx wrangler secret put LINE_CHANNEL_SECRET

@@ -30,8 +30,11 @@ export class NongChokChuayOCR extends DurableObject {
         env: {
           AUTO_EXTRACT_ON_INGEST: String(this.env.AUTO_EXTRACT_ON_INGEST || "true"),
           PUBLIC_BASE_URL: String(this.env.PUBLIC_BASE_URL || ""),
+          TEACHER_NAME: String(this.env.TEACHER_NAME || "ครูพิ้งกี้"),
           LINE_CHANNEL_SECRET: String(this.env.LINE_CHANNEL_SECRET || ""),
           LINE_CHANNEL_ACCESS_TOKEN: String(this.env.LINE_CHANNEL_ACCESS_TOKEN || ""),
+          LLM_PROVIDER: String(this.env.LLM_PROVIDER || "gemini"),
+          LLM_MODEL: String(this.env.LLM_MODEL || "gemini-2.5-flash"),
           LLM_API_KEY: String(this.env.LLM_API_KEY || ""),
         },
       });
@@ -76,10 +79,7 @@ export class NongChokChuayOCR extends DurableObject {
 
 export default {
   async fetch(request, env) {
-    const key =
-      env.LINE_CHANNEL_SECRET && env.LINE_CHANNEL_ACCESS_TOKEN
-        ? "singleton-line"
-        : "singleton";
+    const key = `singleton-${Boolean(env.LINE_CHANNEL_SECRET)}-${Boolean(env.LLM_API_KEY)}`;
     const id = env.NONG_CHOK_CONTAINER.idFromName(key);
     return env.NONG_CHOK_CONTAINER.get(id).fetch(request);
   },

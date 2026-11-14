@@ -7,7 +7,7 @@ import json
 import os
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import app as app_module  # noqa: E402
 import extractor  # noqa: E402
+import line_service  # noqa: E402
 from config import AppConfig  # noqa: E402
 from tests.fakes import FakeLineOCR, make_png_bytes, make_temp_data_dir  # noqa: E402
 
@@ -380,6 +381,72 @@ class NongChokChuayTests(unittest.TestCase):
         mascot_res = self.client.get("/static/mascot.jpg")
         self.assertEqual(mascot_res.status_code, 200)
         self.assertTrue(len(mascot_res.content) > 1000)
+
+    def test_gemini_flash_system_instruction_and_pinky_teacher_persona(self):
+        sys_inst = line_service.build_nong_chok_system_instruction()
+        self.assertIn("ครูพิ้งกี้", sys_inst)
+
+        # Offline summary, text commands, and postback replies all address ครูพิ้งกี้
+        offline_help = line_service.process_line_text_command("สวัสดี", db_path=self.cfg.db_path, config=self.cfg)
+        self.assertIn("ครูพิ้งกี้", offline_help["reply_text"])
+
+        r_up = self.client.post(
+            "/api/ocr",
+            files={"file": ("pinky_bill.png", make_png_bytes(), "image/png")},
+        )
+        doc = r_up.json()
+        summary = line_service.build_nong_chok_reply_summary(
+            doc,
+            expense=doc.get("expense"),
+            config=self.cfg,
+        )
+        self.assertIn("ครูพิ้งกี้", summary["header_title"])
+        self.assertIn("ครูพิ้งกี้", summary["reply_text"])
+
+        pb = line_service.handle_line_postback(
+            f"action=confirm_review&doc_id={doc['doc_id']}",
+            db_path=self.cfg.db_path,
+            config=self.cfg,
+        )
+        self.assertIn("ครูพิ้งกี้", pb["reply_text"])
+
+        # Configured Gemini 2.5 Flash sends systemInstruction containing ครูพิ้งกี้
+        ai_cfg = AppConfig.from_dir(
+            self._tmp.name,
+            llm_provider="gemini",
+            llm_api_key="fake-gemini-key",
+            llm_model="gemini-2.5-flash",
+            teacher_name="ครูพิ้งกี้",
+        )
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {"text": "สวัสดีครับครูพิ้งกี้! น้องโชคเช็กให้แล้ว มีเอกสารรอตรวจ 1 ฉบับครับ"}
+                        ]
+                    }
+                }
+            ]
+        }
+
+        with patch("line_service.requests.post", return_value=mock_resp) as mock_post:
+            res_ai = line_service.process_line_text_command(
+                "สวัสดีครับน้องโชค วันนี้มีอะไรต้องตรวจไหม",
+                db_path=self.cfg.db_path,
+                config=ai_cfg,
+            )
+
+        self.assertEqual(res_ai["intent"], "ai_chat")
+        self.assertIn("ครูพิ้งกี้", res_ai["reply_text"])
+        mock_post.assert_called_once()
+        called_url = mock_post.call_args.args[0]
+        called_json = mock_post.call_args.kwargs["json"]
+        self.assertIn("models/gemini-2.5-flash:generateContent", called_url)
+        self.assertIn("ครูพิ้งกี้", called_json["systemInstruction"]["parts"][0]["text"])
 
 
 if __name__ == "__main__":
