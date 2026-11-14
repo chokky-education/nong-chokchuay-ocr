@@ -76,7 +76,11 @@ export class NongChokChuayOCR extends DurableObject {
 
 export default {
   async fetch(request, env) {
-    const id = env.NONG_CHOK_CONTAINER.idFromName("singleton");
+    const key =
+      env.LINE_CHANNEL_SECRET && env.LINE_CHANNEL_ACCESS_TOKEN
+        ? "singleton-line"
+        : "singleton";
+    const id = env.NONG_CHOK_CONTAINER.idFromName(key);
     return env.NONG_CHOK_CONTAINER.get(id).fetch(request);
   },
 };
