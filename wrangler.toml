@@ -23,7 +23,7 @@ new_sqlite_classes = ["NongChokChuayOCR"]
 
 [vars]
 AUTO_EXTRACT_ON_INGEST = "true"
-PUBLIC_BASE_URL = "https://nong-chokchuay-ocr.workers.dev"
+PUBLIC_BASE_URL = "https://nong-chokchuay-ocr.entrace-space.workers.dev"
 
 # Secrets to configure via Wrangler CLI before deploying:
 #   npx wrangler secret put LINE_CHANNEL_SECRET

@@ -305,7 +305,7 @@ npx wrangler secret put LINE_CHANNEL_ACCESS_TOKEN
 npx wrangler deploy
 ```
 
-> **การตั้งค่า LINE Developers Webhook URL:** นำ URL ที่ได้ (เช่น `https://nong-chokchuay-ocr.workers.dev/api/line/webhook`) ไปวางใน LINE Official Account Messaging API และเปิด Use Webhook (ข้อความตอบกลับผ่าน `replyToken` ฟรีไม่จำกัดจำนวน)
+> **การตั้งค่า LINE Developers Webhook URL:** นำ URL ที่ได้ (เช่น `https://nong-chokchuay-ocr.entrace-space.workers.dev/api/line/webhook`) ไปวางใน LINE Official Account Messaging API และเปิด Use Webhook (ข้อความตอบกลับผ่าน `replyToken` ฟรีไม่จำกัดจำนวน)
 
 ---
 
