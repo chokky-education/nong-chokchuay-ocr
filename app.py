@@ -705,6 +705,9 @@ def create_app(
     # LINE OA Webhook & Interactive Simulator
     @application.post("/api/line/webhook")
     async def line_webhook(request: Request):
+        if cfg.auth_required and not (cfg.line_channel_secret or "").strip():
+            raise HTTPException(status_code=503, detail="LINE channel secret is not configured")
+
         body = await request.body()
         signature = request.headers.get("X-Line-Signature", "")
         if not line_service.verify_line_signature(body, signature, cfg.line_channel_secret):
@@ -717,11 +720,28 @@ def create_app(
 
         events = payload.get("events") or []
         replies: List[Dict[str, Any]] = []
+        rejected_events = 0
 
         for event in events:
             etype = event.get("type")
             reply_token = event.get("replyToken", "")
-            user_id = (event.get("source") or {}).get("userId", "")
+            source = event.get("source") or {}
+            user_id = (source.get("userId") or "").strip()
+
+            allowed, denial_text = line_service.authorize_line_event_source(source, cfg)
+            if not allowed:
+                rejected_events += 1
+                if reply_token and cfg.line_channel_access_token and denial_text:
+                    try:
+                        line_service.reply_line_messages(
+                            reply_token,
+                            [{"type": "text", "text": denial_text}],
+                            cfg.line_channel_access_token,
+                        )
+                    except Exception as exc:
+                        print(f"[LINE] Rejection reply skipped/failed: {exc}")
+                continue
+
             reply_obj: Optional[Dict[str, Any]] = None
 
             if etype == "message":
@@ -801,7 +821,12 @@ def create_app(
                         print(f"[LINE] Reply API call skipped/failed: {exc}")
                 replies.append(reply_obj)
 
-        return {"success": True, "processed_events": len(replies), "replies": replies}
+        return {
+            "success": True,
+            "processed_events": len(replies),
+            "rejected_events": rejected_events,
+            "replies": replies,
+        }
 
     @application.post("/api/line/simulate")
     async def line_simulate(

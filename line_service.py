@@ -1,8 +1,8 @@
 import base64
 import hashlib
 import hmac
-from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qs
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 
 import requests
 
@@ -182,6 +182,49 @@ def verify_line_signature(body: bytes, signature: str, channel_secret: str) -> b
     return hmac.compare_digest(expected, signature.strip())
 
 
+def authorize_line_event_source(source: Any, config: AppConfig) -> Tuple[bool, str]:
+    """Check whether a LINE webhook event source is permitted under the active auth policy."""
+    src = source if isinstance(source, dict) else {}
+    source_type = (src.get("type") or "").strip().lower()
+    user_id = (src.get("userId") or "").strip()
+    allowed_users = {uid.strip() for uid in (config.allowed_line_user_ids or ()) if uid and uid.strip()}
+
+    if config.auth_required:
+        allowed_source_types = {"user"}
+        if config.line_allow_group_chats:
+            allowed_source_types.update({"group", "room"})
+        if source_type not in allowed_source_types:
+            return (
+                False,
+                "ขออภัยครับ เพื่อความปลอดภัยของข้อมูลเด็กและเอกสาร "
+                "น้องโชคช่วยรับคำสั่งเฉพาะในแชทส่วนตัวกับคุณครูที่ได้รับอนุญาตเท่านั้นครับ 🔒",
+            )
+        if not user_id or user_id not in allowed_users:
+            return False, "ขออภัยครับ บัญชี LINE นี้ยังไม่ได้รับอนุญาตให้เข้าถึงระบบนี้ครับ 🙏"
+        return True, ""
+
+    if source_type in ("group", "room") and not config.line_allow_group_chats:
+        return (
+            False,
+            "ขออภัยครับ ระบบปิดการใช้งานในแชทกลุ่มไว้ครับ 🔒",
+        )
+    if allowed_users and user_id not in allowed_users:
+        return False, "ขออภัยครับ บัญชี LINE นี้ยังไม่ได้รับอนุญาตให้เข้าถึงระบบนี้ครับ 🙏"
+    return True, ""
+
+
+def append_external_browser_param(url: str) -> str:
+    """Append openExternalBrowser=1 to http(s) URLs so LINE opens links in Safari/Chrome for OAuth."""
+    raw = (url or "").strip()
+    if not raw or not raw.lower().startswith(("http://", "https://")):
+        return raw
+    parts = urlparse(raw)
+    query_pairs = parse_qsl(parts.query, keep_blank_values=True)
+    if not any(key == "openExternalBrowser" for key, _ in query_pairs):
+        query_pairs.append(("openExternalBrowser", "1"))
+    return urlunparse(parts._replace(query=urlencode(query_pairs)))
+
+
 def download_line_content(message_id: str, access_token: str) -> tuple[bytes, str]:
     """Download image or file bytes from LINE Messaging API Content endpoint."""
     if not access_token:
@@ -311,7 +354,7 @@ def build_nong_chok_reply_summary(
             "label": "💻 เปิดดูบนโต๊ะทำงาน",
             "action": "open_doc",
             "doc_id": doc_id,
-            "url": f"{base_url}/?doc={doc_id}" if base_url else f"/?doc={doc_id}",
+            "url": append_external_browser_param(f"{base_url}/?doc={doc_id}") if base_url else f"/?doc={doc_id}",
         }
     )
 

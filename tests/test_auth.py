@@ -1,3 +1,7 @@
+import base64
+import hashlib
+import hmac
+import json
 import os
 import time
 import unittest
@@ -568,6 +572,339 @@ class AuthApiIntegrationTests(unittest.TestCase):
                     cb = client.get(f"/api/auth/google/callback?code=c4&state={state_val}", follow_redirects=False)
                     self.assertEqual(cb.status_code, 302)
                 self.assertEqual(client.get("/api/system").status_code, 200)
+
+
+def _sign_line_body(body_bytes: bytes, secret: str) -> str:
+    digest = hmac.new(secret.encode("utf-8"), body_bytes, hashlib.sha256).digest()
+    return base64.b64encode(digest).decode("utf-8")
+
+
+class LineWebhookAuthAndExternalBrowserTests(unittest.TestCase):
+    def _make_line_config(self, tmpdir: str, **overrides) -> AppConfig:
+        defaults = dict(
+            inbox_poll_seconds=0,
+            app_env="production",
+            auth_required=True,
+            allowed_emails=("cgikchik07@gmail.com", "ppksaruenee@gmail.com"),
+            google_client_id="google-client-id-123",
+            google_client_secret="google-client-secret-456",
+            auth_session_secret="super-secret-session-signing-key-32bytes!",
+            public_base_url="https://nong-chokchuay-ocr.entrace-space.workers.dev",
+            line_channel_secret="line-secret-xyz",
+            line_channel_access_token="line-token-abc",
+            allowed_line_user_ids=("U-OWNER-1", "U-TEACHER-2"),
+            line_allow_group_chats=False,
+        )
+        defaults.update(overrides)
+        return AppConfig.from_dir(tmpdir, **defaults)
+
+    def test_append_external_browser_param_handles_queries_fragments_and_idempotency(self) -> None:
+        import line_service
+
+        self.assertEqual(
+            line_service.append_external_browser_param("https://example.com/?doc=doc-1"),
+            "https://example.com/?doc=doc-1&openExternalBrowser=1",
+        )
+        self.assertEqual(
+            line_service.append_external_browser_param("https://example.com"),
+            "https://example.com?openExternalBrowser=1",
+        )
+        self.assertEqual(
+            line_service.append_external_browser_param("https://example.com/?doc=doc-1&openExternalBrowser=1#top"),
+            "https://example.com/?doc=doc-1&openExternalBrowser=1#top",
+        )
+        self.assertEqual(line_service.append_external_browser_param("/?doc=doc-1"), "/?doc=doc-1")
+        self.assertEqual(line_service.append_external_browser_param(""), "")
+
+    def test_webhook_returns_503_when_auth_required_and_channel_secret_missing(self) -> None:
+        with make_temp_data_dir() as tmpdir:
+            cfg = self._make_line_config(tmpdir, line_channel_secret="")
+            test_app = create_app(config=cfg, engine_factory=lambda: FakeLineOCR())
+            body = json.dumps(
+                {
+                    "events": [
+                        {
+                            "type": "message",
+                            "replyToken": "rt-0",
+                            "source": {"type": "user", "userId": "U-OWNER-1"},
+                            "message": {"id": "m0", "type": "text", "text": "แพ้อาหาร"},
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+            with patch("line_service.reply_line_messages", return_value=True):
+                with TestClient(test_app) as client:
+                    resp = client.post(
+                        "/api/line/webhook",
+                        content=body,
+                        headers={"Content-Type": "application/json"},
+                    )
+            self.assertEqual(resp.status_code, 503)
+
+    def test_empty_allowed_line_user_ids_fails_closed_with_zero_leaks(self) -> None:
+        with make_temp_data_dir() as tmpdir:
+            cfg = self._make_line_config(tmpdir, allowed_line_user_ids=())
+            test_app = create_app(config=cfg, engine_factory=lambda: FakeLineOCR())
+            database.init_db(cfg.db_path)
+            doc_id = database.save_document(
+                filename="mali.png",
+                file_type="image/png",
+                text_content="ใบสมัคร เด็กหญิงมะลิ ใจดี",
+                lines=[],
+                category="student",
+                db_path=cfg.db_path,
+            )
+            database.upsert_student(
+                document_id=doc_id,
+                full_name="เด็กหญิงมะลิ ใจดี",
+                nickname="น้องมะลิ",
+                classroom="อนุบาล 2/1",
+                parent_name="สมฤดี ใจดี",
+                parent_phone="081-234-5678",
+                allergies="แพ้นมวัว",
+                db_path=cfg.db_path,
+            )
+
+            body = json.dumps(
+                {
+                    "events": [
+                        {
+                            "type": "message",
+                            "replyToken": "rt-empty-list",
+                            "source": {"type": "user", "userId": "U-OWNER-1"},
+                            "message": {"id": "m-1", "type": "text", "text": "แพ้อาหาร"},
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+            with patch("line_service.reply_line_messages", return_value=True) as mock_reply:
+                with TestClient(test_app) as client:
+                    resp = client.post(
+                        "/api/line/webhook",
+                        content=body,
+                        headers={
+                            "X-Line-Signature": _sign_line_body(body, cfg.line_channel_secret),
+                            "Content-Type": "application/json",
+                        },
+                    )
+            self.assertEqual(resp.status_code, 200)
+            payload = resp.json()
+            self.assertEqual(payload["processed_events"], 0)
+            self.assertEqual(payload["rejected_events"], 1)
+            self.assertEqual(payload["replies"], [])
+            raw_dump = json.dumps(payload, ensure_ascii=False)
+            self.assertNotIn("มะลิ", raw_dump)
+            self.assertNotIn("นมวัว", raw_dump)
+            self.assertNotIn("081-234-5678", raw_dump)
+            mock_reply.assert_called_once()
+            sent_dump = json.dumps(mock_reply.call_args.args[1], ensure_ascii=False)
+            self.assertNotIn("มะลิ", sent_dump)
+            self.assertNotIn("นมวัว", sent_dump)
+
+    def test_stranger_rejected_on_text_postback_and_image_without_mutating_db(self) -> None:
+        with make_temp_data_dir() as tmpdir:
+            cfg = self._make_line_config(tmpdir)
+            test_app = create_app(config=cfg, engine_factory=lambda: FakeLineOCR())
+            database.init_db(cfg.db_path)
+            doc_id = database.save_document(
+                filename="pending_bill.png",
+                file_type="image/png",
+                text_content="ใบเสร็จร้านสหกรณ์ 120 บาท",
+                lines=[],
+                category="expense",
+                review_status="pending_review",
+                db_path=cfg.db_path,
+            )
+
+            body = json.dumps(
+                {
+                    "events": [
+                        {
+                            "type": "message",
+                            "replyToken": "rt-s-text",
+                            "source": {"type": "user", "userId": "U-STRANGER"},
+                            "message": {"id": "m-s-1", "type": "text", "text": "ยอดรอเบิก"},
+                        },
+                        {
+                            "type": "postback",
+                            "replyToken": "rt-s-pb",
+                            "source": {"type": "user", "userId": "U-STRANGER"},
+                            "postback": {"data": f"action=confirm_review&doc_id={doc_id}"},
+                        },
+                        {
+                            "type": "message",
+                            "replyToken": "rt-s-img",
+                            "source": {"type": "user", "userId": "U-STRANGER"},
+                            "message": {"id": "m-s-img", "type": "image"},
+                        },
+                    ]
+                }
+            ).encode("utf-8")
+
+            with patch("line_service.download_line_content") as mock_dl, patch(
+                "line_service.reply_line_messages", return_value=True
+            ):
+                with TestClient(test_app) as client:
+                    resp = client.post(
+                        "/api/line/webhook",
+                        content=body,
+                        headers={
+                            "X-Line-Signature": _sign_line_body(body, cfg.line_channel_secret),
+                            "Content-Type": "application/json",
+                        },
+                    )
+
+            self.assertEqual(resp.status_code, 200)
+            payload = resp.json()
+            self.assertEqual(payload["processed_events"], 0)
+            self.assertEqual(payload["rejected_events"], 3)
+            self.assertEqual(payload["replies"], [])
+            mock_dl.assert_not_called()
+            doc_after = database.get_document_by_id(doc_id, db_path=cfg.db_path)
+            self.assertEqual(doc_after["review_status"], "pending_review")
+
+    def test_group_and_room_rejected_by_default_and_allowed_only_when_opted_in_for_allowlisted_user(self) -> None:
+        with make_temp_data_dir() as tmpdir:
+            cfg = self._make_line_config(tmpdir, line_allow_group_chats=False)
+            test_app = create_app(config=cfg, engine_factory=lambda: FakeLineOCR())
+            database.init_db(cfg.db_path)
+            doc_id = database.save_document(
+                filename="mali.png",
+                file_type="image/png",
+                text_content="เด็กหญิงมะลิ ใจดี",
+                lines=[],
+                category="student",
+                db_path=cfg.db_path,
+            )
+            database.upsert_student(
+                document_id=doc_id,
+                full_name="เด็กหญิงมะลิ ใจดี",
+                nickname="น้องมะลิ",
+                classroom="อนุบาล 2/1",
+                parent_phone="081-234-5678",
+                allergies="แพ้นมวัว",
+                db_path=cfg.db_path,
+            )
+
+            group_and_room_body = json.dumps(
+                {
+                    "events": [
+                        {
+                            "type": "message",
+                            "replyToken": "rt-grp",
+                            "source": {"type": "group", "groupId": "G-1", "userId": "U-OWNER-1"},
+                            "message": {"id": "m-g-1", "type": "text", "text": "แพ้อาหาร"},
+                        },
+                        {
+                            "type": "message",
+                            "replyToken": "rt-room",
+                            "source": {"type": "room", "roomId": "R-1", "userId": "U-OWNER-1"},
+                            "message": {"id": "m-r-1", "type": "text", "text": "แพ้อาหาร"},
+                        },
+                    ]
+                }
+            ).encode("utf-8")
+
+            with patch("line_service.reply_line_messages", return_value=True):
+                with TestClient(test_app) as client:
+                    resp = client.post(
+                        "/api/line/webhook",
+                        content=group_and_room_body,
+                        headers={
+                            "X-Line-Signature": _sign_line_body(group_and_room_body, cfg.line_channel_secret),
+                            "Content-Type": "application/json",
+                        },
+                    )
+            self.assertEqual(resp.status_code, 200)
+            payload = resp.json()
+            self.assertEqual(payload["processed_events"], 0)
+            self.assertEqual(payload["rejected_events"], 2)
+            self.assertNotIn("มะลิ", json.dumps(payload, ensure_ascii=False))
+
+            # When line_allow_group_chats=True, allowlisted owner in group succeeds while stranger in group fails
+            cfg_group_ok = self._make_line_config(tmpdir, line_allow_group_chats=True)
+            app_group_ok = create_app(config=cfg_group_ok, engine_factory=lambda: FakeLineOCR())
+            mixed_group_body = json.dumps(
+                {
+                    "events": [
+                        {
+                            "type": "message",
+                            "replyToken": "rt-grp-owner",
+                            "source": {"type": "group", "groupId": "G-1", "userId": "U-OWNER-1"},
+                            "message": {"id": "m-g-2", "type": "text", "text": "แพ้อาหาร"},
+                        },
+                        {
+                            "type": "message",
+                            "replyToken": "rt-grp-stranger",
+                            "source": {"type": "group", "groupId": "G-1", "userId": "U-STRANGER"},
+                            "message": {"id": "m-g-3", "type": "text", "text": "แพ้อาหาร"},
+                        },
+                    ]
+                }
+            ).encode("utf-8")
+            with patch("line_service.reply_line_messages", return_value=True):
+                with TestClient(app_group_ok) as client2:
+                    resp2 = client2.post(
+                        "/api/line/webhook",
+                        content=mixed_group_body,
+                        headers={
+                            "X-Line-Signature": _sign_line_body(mixed_group_body, cfg_group_ok.line_channel_secret),
+                            "Content-Type": "application/json",
+                        },
+                    )
+            self.assertEqual(resp2.status_code, 200)
+            p2 = resp2.json()
+            self.assertEqual(p2["processed_events"], 1)
+            self.assertEqual(p2["rejected_events"], 1)
+            self.assertIn("น้องมะลิ", p2["replies"][0]["reply_text"])
+
+    def test_allowed_teacher_dm_succeeds_and_flex_card_opens_in_external_browser(self) -> None:
+        with make_temp_data_dir() as tmpdir:
+            cfg = self._make_line_config(tmpdir)
+            fake_ocr = FakeLineOCR()
+            fake_ocr.default_text = "ใบเสร็จรับเงิน\nร้านสหกรณ์โรงเรียน\nกระดาษวาดเขียน\nยอดสุทธิ 180.00 บาท\n"
+            test_app = create_app(config=cfg, engine_factory=lambda: fake_ocr)
+            dm_img_body = json.dumps(
+                {
+                    "events": [
+                        {
+                            "type": "message",
+                            "replyToken": "rt-teacher-img",
+                            "source": {"type": "user", "userId": "U-TEACHER-2"},
+                            "message": {"id": "m-t-img-1", "type": "image"},
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+            with patch(
+                "line_service.download_line_content",
+                return_value=(make_png_bytes(), "image/png"),
+            ), patch("line_service.reply_line_messages", return_value=True):
+                with TestClient(test_app) as client:
+                    resp = client.post(
+                        "/api/line/webhook",
+                        content=dm_img_body,
+                        headers={
+                            "X-Line-Signature": _sign_line_body(dm_img_body, cfg.line_channel_secret),
+                            "Content-Type": "application/json",
+                        },
+                    )
+            self.assertEqual(resp.status_code, 200)
+            payload = resp.json()
+            self.assertEqual(payload["processed_events"], 1)
+            self.assertEqual(payload["rejected_events"], 0)
+            reply_obj = payload["replies"][0]
+            open_actions = [a for a in reply_obj["actions"] if a.get("action") == "open_doc"]
+            self.assertEqual(len(open_actions), 1)
+            self.assertIn("openExternalBrowser=1", open_actions[0]["url"])
+            self.assertIn("doc=", open_actions[0]["url"])
+
+            footer_buttons = reply_obj["flex_message"]["contents"]["footer"]["contents"]
+            uri_buttons = [b for b in footer_buttons if b.get("action", {}).get("type") == "uri"]
+            self.assertEqual(len(uri_buttons), 1)
+            self.assertIn("openExternalBrowser=1", uri_buttons[0]["action"]["uri"])
 
 
 if __name__ == "__main__":
