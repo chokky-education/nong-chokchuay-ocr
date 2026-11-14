@@ -20,7 +20,17 @@ _DOCUMENT_MIGRATION_COLUMNS = {
     "doc_date": "TEXT DEFAULT ''",
     "image_width": "INTEGER DEFAULT 0",
     "image_height": "INTEGER DEFAULT 0",
+    "review_status": "TEXT DEFAULT 'pending_review'",
+    "line_user_id": "TEXT DEFAULT ''",
 }
+
+_EXPENSE_MIGRATION_COLUMNS = {
+    "reimbursement_status": "TEXT DEFAULT 'pending_reimbursement'",
+    "budget_source": "TEXT DEFAULT 'classroom'",
+}
+
+VALID_REVIEW_STATUSES = {"pending_review", "reviewed"}
+VALID_REIMBURSEMENT_STATUSES = {"pending_reimbursement", "reimbursed", "personal"}
 
 
 def normalize_tags(raw_tags: Optional[Union[str, List[str]]]) -> List[str]:
@@ -148,6 +158,8 @@ def init_db(db_path: Optional[str] = None) -> None:
         doc_date TEXT DEFAULT '',
         image_width INTEGER DEFAULT 0,
         image_height INTEGER DEFAULT 0,
+        review_status TEXT DEFAULT 'pending_review',
+        line_user_id TEXT DEFAULT '',
         created_at TEXT,
         updated_at TEXT
     );
@@ -193,10 +205,40 @@ def init_db(db_path: Optional[str] = None) -> None:
         currency TEXT DEFAULT 'THB',
         expense_category TEXT DEFAULT 'other',
         extraction_method TEXT DEFAULT 'regex',
+        reimbursement_status TEXT DEFAULT 'pending_reimbursement',
+        budget_source TEXT DEFAULT 'classroom',
         raw_json TEXT DEFAULT '{}',
         created_at TEXT,
         updated_at TEXT,
         FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+    );
+    """)
+
+    existing_exp_cols = {
+        row["name"] for row in cursor.execute("PRAGMA table_info(expenses)").fetchall()
+    }
+    for col_name, col_def in _EXPENSE_MIGRATION_COLUMNS.items():
+        if col_name not in existing_exp_cols:
+            cursor.execute(f"ALTER TABLE expenses ADD COLUMN {col_name} {col_def}")
+
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS students (
+        id TEXT PRIMARY KEY,
+        document_id TEXT UNIQUE,
+        full_name TEXT NOT NULL DEFAULT '',
+        nickname TEXT DEFAULT '',
+        citizen_id TEXT DEFAULT '',
+        birth_date TEXT DEFAULT '',
+        classroom TEXT DEFAULT 'อนุบาล',
+        parent_name TEXT DEFAULT '',
+        parent_phone TEXT DEFAULT '',
+        allergies TEXT DEFAULT '',
+        medical_notes TEXT DEFAULT '',
+        extraction_method TEXT DEFAULT 'regex',
+        raw_json TEXT DEFAULT '{}',
+        created_at TEXT,
+        updated_at TEXT,
+        FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE SET NULL
     );
     """)
 
@@ -223,6 +265,8 @@ def save_document(
     doc_date: str = "",
     image_width: int = 0,
     image_height: int = 0,
+    review_status: str = "pending_review",
+    line_user_id: str = "",
     db_path: Optional[str] = None,
 ) -> str:
     if not doc_id:
@@ -233,6 +277,11 @@ def save_document(
     clean_tags = normalize_tags(tags)
     tags_json_str = json.dumps(clean_tags, ensure_ascii=False)
     clean_category = (category or "general").strip() or "general"
+    clean_review = (
+        review_status.strip()
+        if isinstance(review_status, str) and review_status.strip() in VALID_REVIEW_STATUSES
+        else "pending_review"
+    )
 
     conn = get_db_connection(db_path)
     cursor = conn.cursor()
@@ -244,8 +293,8 @@ def save_document(
             text_content, lines_json, avg_confidence, duration_ms,
             image_preview, source_path, category, tags_json,
             ingestion_channel, doc_date, image_width, image_height,
-            created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            review_status, line_user_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             filename = excluded.filename,
             file_type = excluded.file_type,
@@ -263,6 +312,8 @@ def save_document(
             doc_date = excluded.doc_date,
             image_width = excluded.image_width,
             image_height = excluded.image_height,
+            review_status = excluded.review_status,
+            line_user_id = excluded.line_user_id,
             updated_at = excluded.updated_at
         """,
         (
@@ -283,6 +334,8 @@ def save_document(
             doc_date or "",
             int(image_width or 0),
             int(image_height or 0),
+            clean_review,
+            (line_user_id or "").strip(),
             now,
             now,
         ),
@@ -300,6 +353,7 @@ def update_document_metadata(
     category: Optional[str] = None,
     tags: Optional[Union[str, List[str]]] = None,
     doc_date: Optional[str] = None,
+    review_status: Optional[str] = None,
     db_path: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Update editable document fields and synchronize FTS5."""
@@ -320,12 +374,18 @@ def update_document_metadata(
         _parse_tags_json(row["tags_json"]) if tags is None else normalize_tags(tags)
     )
     new_doc_date = (row["doc_date"] or "") if doc_date is None else doc_date.strip()
+    existing_review = (row["review_status"] if "review_status" in row.keys() else None) or "pending_review"
+    if review_status is not None and review_status.strip() in VALID_REVIEW_STATUSES:
+        new_review_status = review_status.strip()
+    else:
+        new_review_status = existing_review
+
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     cursor.execute(
         """
         UPDATE documents
-        SET text_content = ?, category = ?, tags_json = ?, doc_date = ?, updated_at = ?
+        SET text_content = ?, category = ?, tags_json = ?, doc_date = ?, review_status = ?, updated_at = ?
         WHERE id = ?
         """,
         (
@@ -333,6 +393,7 @@ def update_document_metadata(
             new_category,
             json.dumps(new_tags, ensure_ascii=False),
             new_doc_date,
+            new_review_status,
             now,
             doc_id,
         ),
@@ -347,6 +408,7 @@ def search_documents(
     query: Optional[str] = None,
     category: Optional[str] = None,
     tag: Optional[str] = None,
+    review_status: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
     db_path: Optional[str] = None,
@@ -356,6 +418,7 @@ def search_documents(
     clean_query = (query or "").strip()
     clean_category = (category or "").strip()
     clean_tag = (tag or "").strip()
+    clean_review = (review_status or "").strip()
 
     filter_clauses: List[str] = []
     filter_params: List[Any] = []
@@ -365,11 +428,15 @@ def search_documents(
     if clean_tag:
         filter_clauses.append("EXISTS (SELECT 1 FROM json_each(d.tags_json) WHERE value = ?)")
         filter_params.append(clean_tag)
+    if clean_review and clean_review.lower() != "all":
+        filter_clauses.append("COALESCE(NULLIF(d.review_status, ''), 'pending_review') = ?")
+        filter_params.append(clean_review)
 
     select_cols = """
         d.id, d.filename, d.file_type, d.total_pages, d.avg_confidence,
         d.duration_ms, d.created_at, d.updated_at, d.image_preview,
         d.source_path, d.category, d.tags_json, d.ingestion_channel, d.doc_date,
+        d.review_status, d.line_user_id,
         substr(d.text_content, 1, 300) as snippet,
         length(d.text_content) as char_count
     """
@@ -443,10 +510,38 @@ def search_documents(
                 "tags": _parse_tags_json(r["tags_json"]),
                 "ingestion_channel": r["ingestion_channel"] or "web_upload",
                 "doc_date": r["doc_date"] or "",
+                "review_status": r["review_status"] or "pending_review",
+                "line_user_id": r["line_user_id"] or "",
             }
         )
     conn.close()
     return results
+
+
+def _format_student_row(row: sqlite3.Row) -> Dict[str, Any]:
+    raw_meta = {}
+    if "raw_json" in row.keys() and row["raw_json"]:
+        try:
+            raw_meta = json.loads(row["raw_json"])
+        except Exception:
+            raw_meta = {}
+    return {
+        "id": row["id"],
+        "document_id": row["document_id"] or "",
+        "full_name": row["full_name"] or "",
+        "nickname": row["nickname"] or "",
+        "citizen_id": row["citizen_id"] or "",
+        "birth_date": row["birth_date"] or "",
+        "classroom": row["classroom"] or "อนุบาล",
+        "parent_name": row["parent_name"] or "",
+        "parent_phone": row["parent_phone"] or "",
+        "allergies": row["allergies"] or "",
+        "medical_notes": row["medical_notes"] or "",
+        "extraction_method": row["extraction_method"] or "regex",
+        "raw_json": raw_meta,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
 
 
 def get_document_by_id(doc_id: str, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -468,6 +563,10 @@ def get_document_by_id(doc_id: str, db_path: Optional[str] = None) -> Optional[D
         exp = cursor.execute("SELECT * FROM expenses WHERE document_id = ?", (doc_id,)).fetchone()
         expense_row = _format_expense_row(exp) if exp else None
 
+        stu = cursor.execute("SELECT * FROM students WHERE document_id = ?", (doc_id,)).fetchone()
+        student_row = _format_student_row(stu) if stu else None
+
+        row_keys = set(row.keys())
         return {
             "id": row["id"],
             "filename": row["filename"],
@@ -487,7 +586,10 @@ def get_document_by_id(doc_id: str, db_path: Optional[str] = None) -> Optional[D
             "doc_date": row["doc_date"] or "",
             "image_width": row["image_width"] or 0,
             "image_height": row["image_height"] or 0,
+            "review_status": (row["review_status"] if "review_status" in row_keys else None) or "pending_review",
+            "line_user_id": (row["line_user_id"] if "line_user_id" in row_keys else None) or "",
             "expense": expense_row,
+            "student": student_row,
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -495,13 +597,31 @@ def get_document_by_id(doc_id: str, db_path: Optional[str] = None) -> Optional[D
         conn.close()
 
 
-def _format_expense_row(row: sqlite3.Row, filename: Optional[str] = None) -> Dict[str, Any]:
+def _format_expense_row(
+    row: sqlite3.Row,
+    filename: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     raw_meta = {}
     if row["raw_json"]:
         try:
             raw_meta = json.loads(row["raw_json"])
         except Exception:
             raw_meta = {}
+    row_keys = set(row.keys())
+    resolved_tags = (
+        tags
+        if tags is not None
+        else (_parse_tags_json(row["tags_json"]) if "tags_json" in row_keys else [])
+    )
+    reimb_status = (
+        (row["reimbursement_status"] if "reimbursement_status" in row_keys else None)
+        or "pending_reimbursement"
+    )
+    budget_source = (
+        (row["budget_source"] if "budget_source" in row_keys else None)
+        or "classroom"
+    )
     out = {
         "id": row["id"],
         "document_id": row["document_id"],
@@ -513,6 +633,9 @@ def _format_expense_row(row: sqlite3.Row, filename: Optional[str] = None) -> Dic
         "currency": row["currency"] or "THB",
         "expense_category": row["expense_category"] or "other",
         "extraction_method": row["extraction_method"] or "regex",
+        "reimbursement_status": reimb_status,
+        "budget_source": budget_source,
+        "tags": resolved_tags,
         "raw_json": raw_meta,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -520,6 +643,24 @@ def _format_expense_row(row: sqlite3.Row, filename: Optional[str] = None) -> Dic
     if filename is not None:
         out["filename"] = filename
     return out
+
+
+def _default_reimbursement_status(expense_category: str, doc_tags: List[str]) -> str:
+    if "ส่วนตัว" in doc_tags and expense_category not in {"classroom", "kids_snack"}:
+        return "personal"
+    if expense_category in {"classroom", "kids_snack"} or "เบิกโรงเรียน" in doc_tags:
+        return "pending_reimbursement"
+    return "pending_reimbursement"
+
+
+def _default_budget_source(expense_category: str, reimbursement_status: str) -> str:
+    if reimbursement_status == "personal":
+        return "personal"
+    if expense_category in {"classroom", "kids_snack"}:
+        return expense_category
+    if expense_category == "office":
+        return "subsidy"
+    return "school_project"
 
 
 def upsert_expense(
@@ -533,23 +674,43 @@ def upsert_expense(
     currency: str = "THB",
     expense_category: str = "other",
     extraction_method: str = "regex",
+    reimbursement_status: Optional[str] = None,
+    budget_source: Optional[str] = None,
     raw_json: Optional[Dict[str, Any]] = None,
     db_path: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Create or update the Expense Record attached to a Vault Document."""
     conn = get_db_connection(db_path)
     cursor = conn.cursor()
-    doc_exists = cursor.execute("SELECT id FROM documents WHERE id = ?", (document_id,)).fetchone()
-    if not doc_exists:
+    doc_row = cursor.execute("SELECT id, tags_json FROM documents WHERE id = ?", (document_id,)).fetchone()
+    if not doc_row:
         conn.close()
         return None
 
+    doc_tags = _parse_tags_json(doc_row["tags_json"])
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     existing = cursor.execute(
-        "SELECT id, created_at FROM expenses WHERE document_id = ?", (document_id,)
+        "SELECT id, created_at, reimbursement_status, budget_source FROM expenses WHERE document_id = ?",
+        (document_id,),
     ).fetchone()
     expense_id = existing["id"] if existing else str(uuid.uuid4())
     created_at = existing["created_at"] if existing else now
+    clean_exp_cat = (expense_category or "other").strip() or "other"
+
+    if reimbursement_status and reimbursement_status.strip() in VALID_REIMBURSEMENT_STATUSES:
+        resolved_reimb = reimbursement_status.strip()
+    elif existing and existing["reimbursement_status"]:
+        resolved_reimb = existing["reimbursement_status"]
+    else:
+        resolved_reimb = _default_reimbursement_status(clean_exp_cat, doc_tags)
+
+    if budget_source and budget_source.strip():
+        resolved_budget = budget_source.strip()
+    elif existing and existing["budget_source"]:
+        resolved_budget = existing["budget_source"]
+    else:
+        resolved_budget = _default_budget_source(clean_exp_cat, resolved_reimb)
+
     raw_str = json.dumps(raw_json or {}, ensure_ascii=False)
 
     cursor.execute(
@@ -557,8 +718,9 @@ def upsert_expense(
         INSERT INTO expenses (
             id, document_id, merchant, expense_date, subtotal,
             vat_amount, total_amount, currency, expense_category,
-            extraction_method, raw_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            extraction_method, reimbursement_status, budget_source,
+            raw_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(document_id) DO UPDATE SET
             merchant = excluded.merchant,
             expense_date = excluded.expense_date,
@@ -568,6 +730,8 @@ def upsert_expense(
             currency = excluded.currency,
             expense_category = excluded.expense_category,
             extraction_method = excluded.extraction_method,
+            reimbursement_status = excluded.reimbursement_status,
+            budget_source = excluded.budget_source,
             raw_json = excluded.raw_json,
             updated_at = excluded.updated_at
         """,
@@ -580,8 +744,10 @@ def upsert_expense(
             round(float(vat_amount or 0.0), 2),
             round(float(total_amount or 0.0), 2),
             (currency or "THB").strip() or "THB",
-            (expense_category or "other").strip() or "other",
+            clean_exp_cat,
             (extraction_method or "regex").strip() or "regex",
+            resolved_reimb,
+            resolved_budget,
             raw_str,
             created_at,
             now,
@@ -590,7 +756,7 @@ def upsert_expense(
     conn.commit()
     row = cursor.execute(
         """
-        SELECT e.*, d.filename
+        SELECT e.*, d.filename, d.tags_json
         FROM expenses e
         JOIN documents d ON d.id = e.document_id
         WHERE e.document_id = ?
@@ -604,9 +770,11 @@ def upsert_expense(
 def list_expenses(
     month: Optional[str] = None,
     expense_category: Optional[str] = None,
+    tag: Optional[str] = None,
+    reimbursement_status: Optional[str] = None,
     db_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """List Expense Records and compute aggregate totals optionally filtered by YYYY-MM or category."""
+    """List Expense Records and compute aggregate totals optionally filtered by YYYY-MM, category, tag, or reimbursement_status."""
     conn = get_db_connection(db_path)
     clauses: List[str] = []
     params: List[Any] = []
@@ -616,11 +784,17 @@ def list_expenses(
     if expense_category and expense_category.strip() and expense_category.strip().lower() != "all":
         clauses.append("e.expense_category = ?")
         params.append(expense_category.strip())
+    if tag and tag.strip() and tag.strip().lower() != "all":
+        clauses.append("EXISTS (SELECT 1 FROM json_each(d.tags_json) WHERE value = ?)")
+        params.append(tag.strip())
+    if reimbursement_status and reimbursement_status.strip() and reimbursement_status.strip().lower() != "all":
+        clauses.append("COALESCE(NULLIF(e.reimbursement_status, ''), 'pending_reimbursement') = ?")
+        params.append(reimbursement_status.strip())
 
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     rows = conn.execute(
         f"""
-        SELECT e.*, d.filename
+        SELECT e.*, d.filename, d.tags_json
         FROM expenses e
         JOIN documents d ON d.id = e.document_id
         {where_sql}
@@ -634,6 +808,10 @@ def list_expenses(
     total_amount = round(sum(item["total_amount"] for item in items), 2)
     vat_amount = round(sum(item["vat_amount"] for item in items), 2)
     subtotal = round(sum(item["subtotal"] for item in items), 2)
+    pending_items = [i for i in items if i["reimbursement_status"] == "pending_reimbursement"]
+    reimbursed_items = [i for i in items if i["reimbursement_status"] == "reimbursed"]
+    personal_items = [i for i in items if i["reimbursement_status"] == "personal"]
+
     by_category: Dict[str, float] = {}
     for item in items:
         cat = item["expense_category"] or "other"
@@ -646,6 +824,10 @@ def list_expenses(
             "subtotal": subtotal,
             "vat_amount": vat_amount,
             "total_amount": total_amount,
+            "pending_reimbursement_count": len(pending_items),
+            "pending_reimbursement_total": round(sum(i["total_amount"] for i in pending_items), 2),
+            "reimbursed_total": round(sum(i["total_amount"] for i in reimbursed_items), 2),
+            "personal_total": round(sum(i["total_amount"] for i in personal_items), 2),
             "by_category": by_category,
         },
     }
@@ -654,6 +836,167 @@ def list_expenses(
 def delete_expense(document_id: str, db_path: Optional[str] = None) -> bool:
     conn = get_db_connection(db_path)
     cur = conn.execute("DELETE FROM expenses WHERE document_id = ?", (document_id,))
+    deleted = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+
+def upsert_student(
+    *,
+    student_id: Optional[str] = None,
+    document_id: Optional[str] = None,
+    full_name: str = "",
+    nickname: str = "",
+    citizen_id: str = "",
+    birth_date: str = "",
+    classroom: str = "อนุบาล",
+    parent_name: str = "",
+    parent_phone: str = "",
+    allergies: str = "",
+    medical_notes: str = "",
+    extraction_method: str = "regex",
+    raw_json: Optional[Dict[str, Any]] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create or update a kindergarten Student Profile, optionally linked to a Vault Document."""
+    conn = get_db_connection(db_path)
+    cursor = conn.cursor()
+
+    clean_doc_id = (document_id or "").strip() or None
+    if clean_doc_id:
+        doc_exists = cursor.execute("SELECT id FROM documents WHERE id = ?", (clean_doc_id,)).fetchone()
+        if not doc_exists:
+            clean_doc_id = None
+
+    existing = None
+    if student_id:
+        existing = cursor.execute("SELECT id, created_at FROM students WHERE id = ?", (student_id,)).fetchone()
+    if not existing and clean_doc_id:
+        existing = cursor.execute("SELECT id, created_at FROM students WHERE document_id = ?", (clean_doc_id,)).fetchone()
+
+    resolved_id = existing["id"] if existing else (student_id or str(uuid.uuid4()))
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    created_at = existing["created_at"] if existing else now
+    raw_str = json.dumps(raw_json or {}, ensure_ascii=False)
+
+    cursor.execute(
+        """
+        INSERT INTO students (
+            id, document_id, full_name, nickname, citizen_id,
+            birth_date, classroom, parent_name, parent_phone,
+            allergies, medical_notes, extraction_method, raw_json,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            document_id = COALESCE(excluded.document_id, students.document_id),
+            full_name = excluded.full_name,
+            nickname = excluded.nickname,
+            citizen_id = excluded.citizen_id,
+            birth_date = excluded.birth_date,
+            classroom = excluded.classroom,
+            parent_name = excluded.parent_name,
+            parent_phone = excluded.parent_phone,
+            allergies = excluded.allergies,
+            medical_notes = excluded.medical_notes,
+            extraction_method = excluded.extraction_method,
+            raw_json = excluded.raw_json,
+            updated_at = excluded.updated_at
+        """,
+        (
+            resolved_id,
+            clean_doc_id,
+            full_name.strip(),
+            nickname.strip(),
+            citizen_id.strip(),
+            birth_date.strip(),
+            (classroom or "อนุบาล").strip() or "อนุบาล",
+            parent_name.strip(),
+            parent_phone.strip(),
+            allergies.strip(),
+            medical_notes.strip(),
+            (extraction_method or "regex").strip() or "regex",
+            raw_str,
+            created_at,
+            now,
+        ),
+    )
+    conn.commit()
+    row = cursor.execute("SELECT * FROM students WHERE id = ?", (resolved_id,)).fetchone()
+    conn.close()
+    return _format_student_row(row)
+
+
+def list_students(
+    query: Optional[str] = None,
+    classroom: Optional[str] = None,
+    has_allergy: Optional[bool] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """List kindergarten Student Profiles with optional search, classroom, and allergy filters."""
+    conn = get_db_connection(db_path)
+    clauses: List[str] = []
+    params: List[Any] = []
+
+    clean_query = (query or "").strip()
+    if clean_query:
+        like_term = f"%{clean_query}%"
+        clauses.append(
+            "(full_name LIKE ? OR nickname LIKE ? OR citizen_id LIKE ? OR parent_name LIKE ? OR parent_phone LIKE ? OR allergies LIKE ? OR medical_notes LIKE ?)"
+        )
+        params.extend([like_term] * 7)
+
+    clean_class = (classroom or "").strip()
+    if clean_class and clean_class.lower() != "all":
+        clauses.append("classroom = ?")
+        params.append(clean_class)
+
+    if has_allergy is True:
+        clauses.append("(TRIM(allergies) != '' OR TRIM(medical_notes) != '')")
+    elif has_allergy is False:
+        clauses.append("(TRIM(allergies) = '' AND TRIM(medical_notes) = '')")
+
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = conn.execute(
+        f"SELECT * FROM students {where_sql} ORDER BY classroom ASC, full_name ASC, created_at DESC",
+        params,
+    ).fetchall()
+    conn.close()
+
+    items = [_format_student_row(r) for r in rows]
+    allergy_count = sum(1 for item in items if item["allergies"] or item["medical_notes"])
+    by_classroom: Dict[str, int] = {}
+    for item in items:
+        cls_name = item["classroom"] or "อนุบาล"
+        by_classroom[cls_name] = by_classroom.get(cls_name, 0) + 1
+
+    return {
+        "students": items,
+        "summary": {
+            "total_students": len(items),
+            "allergy_count": allergy_count,
+            "by_classroom": by_classroom,
+        },
+    }
+
+
+def get_student_by_id(student_id: str, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    conn = get_db_connection(db_path)
+    row = conn.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone()
+    conn.close()
+    return _format_student_row(row) if row else None
+
+
+def get_student_by_document_id(document_id: str, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    conn = get_db_connection(db_path)
+    row = conn.execute("SELECT * FROM students WHERE document_id = ?", (document_id,)).fetchone()
+    conn.close()
+    return _format_student_row(row) if row else None
+
+
+def delete_student(student_id: str, db_path: Optional[str] = None) -> bool:
+    conn = get_db_connection(db_path)
+    cur = conn.execute("DELETE FROM students WHERE id = ?", (student_id,))
     deleted = cur.rowcount > 0
     conn.commit()
     conn.close()
@@ -686,12 +1029,38 @@ def get_db_stats(db_path: Optional[str] = None) -> Dict[str, Any]:
     conn = get_db_connection(target_path)
     cursor = conn.cursor()
     row = cursor.execute(
-        "SELECT COUNT(*) as doc_count, COALESCE(SUM(total_pages), 0) as total_pages, COALESCE(SUM(length(text_content)), 0) as total_chars FROM documents"
+        """
+        SELECT
+            COUNT(*) as doc_count,
+            COALESCE(SUM(total_pages), 0) as total_pages,
+            COALESCE(SUM(length(text_content)), 0) as total_chars,
+            COALESCE(SUM(CASE WHEN COALESCE(NULLIF(review_status, ''), 'pending_review') = 'pending_review' THEN 1 ELSE 0 END), 0) as pending_review_count
+        FROM documents
+        """
+    ).fetchone()
+    stu_row = cursor.execute(
+        """
+        SELECT
+            COUNT(*) as total_students,
+            COALESCE(SUM(CASE WHEN TRIM(allergies) != '' OR TRIM(medical_notes) != '' THEN 1 ELSE 0 END), 0) as allergy_student_count
+        FROM students
+        """
+    ).fetchone()
+    exp_row = cursor.execute(
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN COALESCE(NULLIF(reimbursement_status, ''), 'pending_reimbursement') = 'pending_reimbursement' THEN total_amount ELSE 0 END), 0.0) as pending_reimbursement_total
+        FROM expenses
+        """
     ).fetchone()
     conn.close()
     return {
         "total_documents": row["doc_count"],
         "total_pages": row["total_pages"],
         "total_characters": row["total_chars"],
+        "pending_review_count": row["pending_review_count"],
+        "total_students": stu_row["total_students"] if stu_row else 0,
+        "allergy_student_count": stu_row["allergy_student_count"] if stu_row else 0,
+        "pending_reimbursement_total": round(float(exp_row["pending_reimbursement_total"] or 0.0), 2) if exp_row else 0.0,
         "db_path": target_path,
     }

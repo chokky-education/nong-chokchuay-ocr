@@ -3,13 +3,26 @@ import shutil
 import threading
 import time
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import ocr_service
 from config import AppConfig
 
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".tif", ".pdf"}
 IGNORED_SUFFIXES = (".tmp", ".part", ".crdownload", ".download")
+
+
+def _map_subfolder_to_tags(subfolder_name: str) -> List[str]:
+    """Map an inbox subdirectory name to default owner/context tags."""
+    cleaned = (subfolder_name or "").strip()
+    if not cleaned:
+        return []
+    lowered = cleaned.lower()
+    if lowered in {"teacher", "kru", "ครู", "ครูอนุบาล", "kindergarten"}:
+        return ["ครูอนุบาล"]
+    if lowered in {"me", "personal", "ส่วนตัว", "ฉัน"}:
+        return ["ส่วนตัว"]
+    return [cleaned]
 
 
 class InboxWatcher:
@@ -53,6 +66,24 @@ class InboxWatcher:
         with open(err_note_path, "w", encoding="utf-8") as fh:
             fh.write(f"Failed at: {datetime.now().isoformat()}\nError: {error_msg}\n")
 
+    def _iter_candidate_files(self) -> List[Tuple[str, str, List[str]]]:
+        """Collect (filename, full_path, auto_tags) across inbox root and first-level subfolders."""
+        candidates: List[Tuple[str, str, List[str]]] = []
+        if not os.path.isdir(self.config.inbox_dir):
+            return candidates
+
+        for name in sorted(os.listdir(self.config.inbox_dir)):
+            full_path = os.path.join(self.config.inbox_dir, name)
+            if self._is_candidate_file(name, full_path):
+                candidates.append((name, full_path, []))
+            elif not name.startswith(".") and os.path.isdir(full_path):
+                auto_tags = _map_subfolder_to_tags(name)
+                for sub_name in sorted(os.listdir(full_path)):
+                    sub_full_path = os.path.join(full_path, sub_name)
+                    if self._is_candidate_file(sub_name, sub_full_path):
+                        candidates.append((sub_name, sub_full_path, auto_tags))
+        return candidates
+
     def scan_once(self, require_stability: bool = False) -> Dict[str, Any]:
         """Scan inbox once, ingesting valid files and quarantining failures."""
         with self._lock:
@@ -61,13 +92,10 @@ class InboxWatcher:
             failed_files: List[str] = []
             skipped = 0
 
-            entries = sorted(os.listdir(self.config.inbox_dir))
+            candidates = self._iter_candidate_files()
             active_paths = set()
 
-            for name in entries:
-                full_path = os.path.join(self.config.inbox_dir, name)
-                if not self._is_candidate_file(name, full_path):
-                    continue
+            for name, full_path, auto_tags in candidates:
                 active_paths.add(full_path)
 
                 try:
@@ -95,6 +123,7 @@ class InboxWatcher:
                         config=self.config,
                         process_all_pages=True,
                         save_to_db=True,
+                        tags=auto_tags,
                         ingestion_channel="watch_folder",
                     )
                     os.remove(full_path)
@@ -123,11 +152,7 @@ class InboxWatcher:
 
     def get_status(self) -> Dict[str, Any]:
         self.config.ensure_dirs()
-        pending = [
-            name
-            for name in os.listdir(self.config.inbox_dir)
-            if self._is_candidate_file(name, os.path.join(self.config.inbox_dir, name))
-        ]
+        pending = [name for name, _, _ in self._iter_candidate_files()]
         failed = [
             name
             for name in os.listdir(self.config.inbox_failed_dir)
@@ -139,6 +164,10 @@ class InboxWatcher:
             "running": bool(self._thread and self._thread.is_alive()),
             "polling_seconds": self.config.inbox_poll_seconds,
             "inbox_dir": self.config.inbox_dir,
+            "inbox_subfolders": {
+                "teacher": os.path.join(self.config.inbox_dir, "teacher"),
+                "me": os.path.join(self.config.inbox_dir, "me"),
+            },
             "inbox_failed_dir": self.config.inbox_failed_dir,
             "pending_count": len(pending),
             "failed_count": len(failed),

@@ -1,0 +1,10 @@
+.venv/
+.git/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+data/
+.pytest_cache/
+.scratch/
+.wrangler/

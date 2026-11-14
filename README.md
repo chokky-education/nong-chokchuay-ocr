@@ -1,7 +1,7 @@
-# 🇹🇭 OpenThai 2.0 OCR Studio & Document Vault
+# 🌤️ น้องโชคช่วย (Nong ChokChuay) — ผู้ช่วยจัดการเอกสาร & บิลเบิกจ่ายคุณครูอนุบาล
 
-> **ระบบแปลงภาพและเอกสาร PDF ภาษาไทยเป็นข้อความอัตโนมัติ (AI OCR) พร้อมคลังฐานข้อมูล Full-Text Search ในเครื่อง (On-Premise / 100% Offline & Private)**  
-> พัฒนาต่อยอดจากโมเดล Open-weights **OpenThai 2.0 OCR** โดย **iApp Technology** ออกแบบสถาปัตยกรรมแบบ Modular เพื่อให้พร้อมนำไปพัฒนาต่อยอดเป็น **Digital Products, Micro-SaaS หรือระบบ RAG สำหรับองค์กร** ได้ทันที
+> **ระบบผู้ช่วยคุณครูอนุบาล (LINE OA + เว็บ/LIFF + คลังเอกสารส่วนตัวไม่มีวันหมดอายุ)**  
+> พัฒนาต่อยอดจากโมเดล **OpenThai 2.0 OCR Text (ONNX)** โดย **iApp Technology** เพื่อลดภาระงานเอกสารของคุณครู: จดบิลสำรองจ่ายรอเบิกคืน, เก็บทะเบียนเด็กอนุบาลพร้อมป้ายเตือนแพ้อาหาร, และค้นหาเอกสารโรงเรียนผ่าน LINE OA โดยใช้ Reply API ฟรีไม่จำกัด
 
 ---
 
@@ -13,7 +13,7 @@
 - [4. สถาปัตยกรรมฐานข้อมูลและการค้นหา (Database & Full-Text Search)](#4-สถาปัตยกรรมฐานข้อมูลและการค้นหา-database--full-text-search)
 - [5. รายละเอียด REST API (API Reference)](#5-รายละเอียด-rest-api-api-reference)
 - [6. พิมพ์เขียวสำหรับการต่อยอดเป็น Digital Product (Product Blueprints)](#6-พิมพ์เขียวสำหรับการต่อยอดเป็น-digital-product-product-blueprints)
-- [7. การนำไปขึ้นเซิร์ฟเวอร์และการ Deploy ด้วย Docker](#7-การนำไปขึ้นเซิร์ฟเวอร์และการ-deploy-ด้วย-docker)
+- [7. การนำไปขึ้นเซิร์ฟเวอร์และการ Deploy ด้วย Docker & Cloudflare ($5/เดือน)](#7-การนำไปขึ้นเซิร์ฟเวอร์และการ-deploy-ด้วย-docker--cloudflare-5เดือน)
 - [8. ประสิทธิภาพและข้อกำหนดทรัพยากร (Performance & Benchmarks)](#8-ประสิทธิภาพและข้อกำหนดทรัพยากร-performance--benchmarks)
 - [9. ลิขสิทธิ์และการอ้างอิง (License & Attributions)](#9-ลิขสิทธิ์และการอ้างอิง-license--attributions)
 
@@ -21,34 +21,29 @@
 
 ## 1. ภาพรวมระบบ (System Overview)
 
-ระบบนี้รวมเอาโมเดล **OpenThai 2.0 OCR Text (ONNX)** ขนาดจิ๋วเพียง **4.2 MB** เข้ากับ Web Server สมรรถนะสูง (FastAPI) และ SQLite ฐานข้อมูลในตัวที่มีความสามารถ Trigram FTS5 Full-Text Search:
+ระบบนี้รวมเอาโมเดล **OpenThai 2.0 OCR Text (ONNX)** ขนาดจิ๋วเพียง **4.2 MB** เข้ากับ Web Server สมรรถนะสูง (FastAPI), SQLite Trigram FTS5 Full-Text Search และ **LINE OA Webhook + Interactive Simulator** สำหรับคุณครูอนุบาล:
 
 ```
-[ เอกสารต้นฉบับ ] ---> [ pypdfium2 / Pillow ] ---> [ OpenThai 2.0 OCR (ONNX) ]
- (PDF / รูปภาพ)           (แปลงภาพ 300 DPI)           - PP-OCRv6-tiny Detector (1.8MB)
-                                                      - Thai CTC Recognizer (2.4MB)
-                                                                 │
-                                                                 ▼
-                                                  [ ข้อความ + Bounding Boxes ]
-                                                                 │
-                                        ┌────────────────────────┴────────────────────────┐
-                                        ▼                                                 ▼
-                          [ Interactive Web UI ]                             [ SQLite Database ]
-                         - ชี้เมาส์ดู Bounding Boxes                         - ตาราง documents (Metadata + JSON)
-                         - คัดลอก / Export (.txt, .json, .md)                - FTS5 Trigram Full-Text Search
-                         - แสดงผลความแม่นยำรายบรรทัด                          - ค้นหาคำภาษาไทยได้ทันที
+[ มือถือครู (LINE OA) / เว็บโต๊ะทำงาน ] ---> [ FastAPI + OpenThai 2.0 ONNX (CPU) ]
+   (ถ่ายรูปบิล, สูติบัตรเด็ก, PDF)             - PP-OCRv6-tiny + Thai CTC (~0.4s/หน้า)
+                                                               │
+                        ┌──────────────────────────────────────┼────────────────────────────────────┐
+                        ▼                                      ▼                                    ▼
+         [ 💸 สมุดเบิกจ่ายห้องเรียน ]             [ 👶 แฟ้มเด็กอนุบาล & แพ้อาหาร ]         [ 📂 ตู้เซฟเอกสารโรงเรียน ]
+        - แยกเงินสำรองจ่าย / รอเบิกคืน          - ดึงชื่อ เลข 13 หลัก วันเกิด (พ.ศ->ค.ศ.)  - ถาดรอตรวจ (1-Click Review)
+        - ส่งออก Excel CSV ภาษาไทยไม่เพี้ยน      - ป้ายเตือนแพ้อาหาร & เบอร์ผู้ปกครอง      - ค้นหา FTS5 ไม่มีวันหมดอายุ
 ```
 
-### จุดเด่นเชิงเทคนิค (Local-first Solo SaaS)
-- **ความปลอดภัยระดับสูงสุด (Zero Image Leak):** ประมวลผล OCR บน CPU เครื่องตัวเอง ไฟล์ภาพและ PDF ต้นฉบับอยู่ในเครื่อง 100% (และต่อให้เปิดใช้ LLM API เสริม ระบบจะส่งเฉพาะข้อความ OCR text เท่านั้น)
-- **Personal Paperless Vault:** เก็บไฟล์ต้นฉบับลง `data/uploads/` ดาวน์โหลดคืนได้, จัดหมวดหมู่และแท็ก, แก้ไขข้อความที่อ่านผิดเพื่อ Re-index FTS5 และกรองค้นหาได้ทันที
+### จุดเด่นสำหรับคุณครูอนุบาล & LINE OA SaaS
+- **ส่งงานผ่าน LINE OA ตอบกลับฟรี (`replyToken`):** รองรับ Webhook (`/api/line/webhook`) ตรวจสอบลายเซ็น `X-Line-Signature`, ตอบกลับเป็น Flex Card กด "✅ ยืนยันตรวจแล้ว" หรือ "💸 เบิกเงินคืนแล้ว" และค้นหาในแชทด้วยคำสั่ง `"ยอดรอเบิก"`, `"แพ้อาหาร"`, หรือคำค้นเอกสาร พร้อมตัวจำลองแชท LINE บนหน้าเว็บ (`/api/line/simulate`)
+- **แฟ้มทะเบียนเด็ก & แจ้งเตือนแพ้อาหาร:** สกัดชื่อ-นามสกุล, ชื่อเล่น, เลขบัตร 13 หลัก, วันเกิด (แปลง พ.ศ.→ค.ศ.), ห้องเรียน, เบอร์ผู้ปกครอง, ประวัติแพ้อาหาร และโรคประจำตัวจากใบสมัคร/สูติบัตรอัตโนมัติ (แบบ Offline Regex หรือ Hybrid Text LLM)
+- **สมุดเบิกจ่ายเงินสำรองจ่าย:** แยกรายจ่าย `pending_reimbursement` (รอเบิกคืนโรงเรียน), `reimbursed` (เบิกคืนแล้ว), และ `personal` (ส่วนตัว) พร้อม Dashboard KPI และ Export CSV (UTF-8 BOM)
+- **ความปลอดภัย (Privacy-first):** ประมวลผลภาพบนเซิร์ฟเวอร์ตัวเอง 100% เก็บไฟล์ต้นฉบับใน `data/uploads/` และต่อให้เปิด LLM เสริม ก็ส่งเฉพาะข้อความ Text ที่อ่านได้เท่านั้น
 - **Watch Folder (`data/inbox/`):** โยนไฟล์ภาพหรือ PDF ลงโฟลเดอร์ `data/inbox/` เพื่อให้ระบบดูดไปสแกนและจัดเก็บอัตโนมัติ (ไฟล์เสียถูกแยกเข้า `data/inbox_failed/` พร้อม `.error.txt`)
-- **Offline + Hybrid Expense Tracker:** สกัดข้อมูลใบเสร็จ/สลิป (วันที่ พ.ศ.→ค.ศ., ร้านค้า, ก่อน VAT, VAT, ยอดสุทธิ) แบบ Offline ด้วย Thai Regex หรือต่อ LLM ผ่าน `.env` พร้อมหน้า Dashboard รายเดือนและ Export CSV (UTF-8 BOM เปิดใน Excel ภาษาไทยไม่เพี้ยน)
-- **ไม่ต้องพึ่งพา GPU:** โมเดลทำงานผ่าน `onnxruntime` รันบน CPU ปกติ (Apple Silicon M-Series หรือ Intel/AMD x86_64) เฉลี่ย ~0.39 - 0.50 วินาทีต่อหน้า A4
 
 ### การตั้งค่า `.env` และรันชุดทดสอบ
 ```bash
-cp .env.example .env  # (ตัวเลือก) ตั้งค่า Watch Folder หรือ LLM_API_KEY
+cp .env.example .env  # ตั้งค่า LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN, PUBLIC_BASE_URL หรือ LLM_API_KEY
 ./.venv/bin/python -m unittest discover -s tests -v
 ```
 
@@ -290,22 +285,27 @@ ORDER BY d.created_at DESC;
 
 ---
 
-## 7. การนำไปขึ้นเซิร์ฟเวอร์และการ Deploy ด้วย Docker
+## 7. การนำไปขึ้นเซิร์ฟเวอร์และการ Deploy ด้วย Docker & Cloudflare ($5/เดือน)
 
-โปรเจกต์มี `Dockerfile` พร้อมใช้งาน คุณสามารถ Build และนำไปรันบน Server เช่น Ubuntu VPS, AWS EC2, GCP Compute Engine หรือ Cloud Container Platform ได้ทันที:
+โปรเจกต์มี `Dockerfile` และ `wrangler.toml` พร้อมใช้งาน คุณสามารถ Build และนำไปรันบน **Cloudflare Workers Paid ($5/เดือน) + Cloudflare Containers** (ตั้งค่า `sleepAfter = "3m"` ปิดเครื่องอัตโนมัติเมื่อไม่มีการใช้งานเพื่อให้ RAM ~400-500 MB อยู่ในโควตา $5/เดือน) หรือ VPS / AWS EC2 / Cloud Container Platform ได้ทันที:
 
 ```bash
-# 1. Build Docker image
-docker build -t openthai-ocr-app .
-
-# 2. Run Container (Map พอร์ต 8765 และ Mount โฟลเดอร์ data เพื่อเก็บฐานข้อมูลถาวร)
+# 1. Build & Run แบบ Docker
+docker build -t nong-chokchuay-ocr .
 docker run -d \
   -p 8765:8765 \
-  --name openthai-ocr \
+  --name nong-chokchuay \
   -v $(pwd)/data:/app/data \
   --restart unless-stopped \
-  openthai-ocr-app
+  nong-chokchuay-ocr
+
+# 2. ตั้งค่า LINE OA & Deploy ขึ้น Cloudflare Workers Paid ($5/mo)
+npx wrangler secret put LINE_CHANNEL_SECRET
+npx wrangler secret put LINE_CHANNEL_ACCESS_TOKEN
+npx wrangler deploy
 ```
+
+> **การตั้งค่า LINE Developers Webhook URL:** นำ URL ที่ได้ (เช่น `https://nong-chokchuay-ocr.workers.dev/api/line/webhook`) ไปวางใน LINE Official Account Messaging API และเปิด Use Webhook (ข้อความตอบกลับผ่าน `replyToken` ฟรีไม่จำกัดจำนวน)
 
 ---
 

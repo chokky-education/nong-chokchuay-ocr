@@ -80,24 +80,33 @@ def apply_intelligence_to_document(
     db_path: Optional[str] = None,
     *,
     force_expense: bool = False,
-) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-    """Merge suggested metadata onto default fields and persist an Expense Record when applicable."""
+    force_student: bool = False,
+) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Merge suggested metadata onto existing fields and persist Expense Record / Student Profile."""
     suggested_cat = intel.get("doc_category") or "general"
     suggested_tags = intel.get("tags") or []
+    normalized_current = database.normalize_tags(current_tags or [])
+    merged_tags = database.normalize_tags(normalized_current + list(suggested_tags))
+    tags_changed = merged_tags != normalized_current
+    cat_changed = current_category == "general" and suggested_cat != "general"
+
     updated_doc = None
-    if (current_category == "general" and suggested_cat != "general") or (
-        not current_tags and suggested_tags
-    ):
+    if cat_changed or tags_changed:
         updated_doc = database.update_document_metadata(
             doc_id,
-            category=suggested_cat if current_category == "general" else current_category,
-            tags=suggested_tags if not current_tags else current_tags,
+            category=suggested_cat if cat_changed else current_category,
+            tags=merged_tags if tags_changed else normalized_current,
             db_path=db_path,
         )
 
     expense_record = None
     if (force_expense or intel.get("is_expense")) and intel.get("expense"):
         exp = intel["expense"]
+        reimb_status = exp.get("reimbursement_status")
+        budget_source = exp.get("budget_source")
+        if "ส่วนตัว" in merged_tags and exp.get("expense_category") not in {"classroom", "kids_snack"}:
+            reimb_status = "personal"
+            budget_source = "personal"
         expense_record = database.upsert_expense(
             document_id=doc_id,
             merchant=exp["merchant"],
@@ -108,10 +117,33 @@ def apply_intelligence_to_document(
             currency=exp["currency"],
             expense_category=exp["expense_category"],
             extraction_method=exp["extraction_method"],
+            reimbursement_status=reimb_status,
+            budget_source=budget_source,
             raw_json=intel,
             db_path=db_path,
         )
-    return updated_doc, expense_record
+
+    student_record = None
+    if (force_student or intel.get("is_student")) and intel.get("student"):
+        stu = intel["student"]
+        if any(stu.get(k) for k in ("full_name", "nickname", "citizen_id", "parent_phone", "allergies")):
+            student_record = database.upsert_student(
+                document_id=doc_id,
+                full_name=stu.get("full_name", ""),
+                nickname=stu.get("nickname", ""),
+                citizen_id=stu.get("citizen_id", ""),
+                birth_date=stu.get("birth_date", ""),
+                classroom=stu.get("classroom", "อนุบาล"),
+                parent_name=stu.get("parent_name", ""),
+                parent_phone=stu.get("parent_phone", ""),
+                allergies=stu.get("allergies", ""),
+                medical_notes=stu.get("medical_notes", ""),
+                extraction_method=stu.get("extraction_method", "regex"),
+                raw_json=intel,
+                db_path=db_path,
+            )
+
+    return updated_doc, expense_record, student_record
 
 
 def ingest_document(
@@ -129,8 +161,10 @@ def ingest_document(
     ingestion_channel: str = "web_upload",
     doc_date: str = "",
     auto_extract: Optional[bool] = None,
+    review_status: str = "pending_review",
+    line_user_id: str = "",
 ) -> Dict[str, Any]:
-    """Run OCR on image/PDF bytes and optionally persist Source File and Vault Document."""
+    """Run OCR on image/PDF bytes and optionally persist Source File, Vault Document, Expense Record, and Student Profile."""
     lower_name = (filename or "unknown").lower()
     is_pdf = lower_name.endswith(".pdf") or content_type == "application/pdf"
     file_size = len(contents)
@@ -197,6 +231,7 @@ def ingest_document(
     doc_id: Optional[str] = None
     source_path = ""
     expense_record: Optional[Dict[str, Any]] = None
+    student_record: Optional[Dict[str, Any]] = None
     should_auto_extract = config.auto_extract_on_ingest if auto_extract is None else auto_extract
 
     if save_to_db:
@@ -221,6 +256,8 @@ def ingest_document(
                 doc_date=doc_date,
                 image_width=orig_w,
                 image_height=orig_h,
+                review_status=review_status,
+                line_user_id=line_user_id,
                 db_path=config.db_path,
             )
         except Exception:
@@ -233,13 +270,14 @@ def ingest_document(
                 intel = extractor.extract_document_intelligence(
                     full_text, config, extraction_method="auto", require_expense_hint=True
                 )
-                updated_doc, expense_record = apply_intelligence_to_document(
+                updated_doc, expense_record, student_record = apply_intelligence_to_document(
                     doc_id,
                     clean_category,
                     clean_tags,
                     intel,
                     db_path=config.db_path,
                     force_expense=False,
+                    force_student=False,
                 )
                 if updated_doc:
                     clean_category = updated_doc["category"]
@@ -265,8 +303,11 @@ def ingest_document(
         "tags": clean_tags,
         "ingestion_channel": ingestion_channel,
         "doc_date": doc_date,
+        "review_status": review_status,
+        "line_user_id": line_user_id,
         "auto_extract": bool(should_auto_extract),
         "expense": expense_record,
+        "student": student_record,
         "stats": {
             "duration_ms": total_duration_ms,
             "avg_ms_per_page": round(total_duration_ms / max(1, len(images)), 1),

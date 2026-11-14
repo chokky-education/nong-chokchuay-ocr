@@ -135,6 +135,91 @@ class ExtractorAndExpenseDashboardTest(unittest.TestCase):
                 after = client.get("/api/expenses", params={"month": "2026-11"}).json()
                 self.assertEqual(len(after["expenses"]), 0)
 
+    def test_kindergarten_categories_auto_tags_and_tag_filtered_csv_export(self) -> None:
+        from extractor import extract_document_intelligence, extract_expense_regex
+
+        cfg = AppConfig.from_dir("/tmp/unused-kindergarten-test", inbox_poll_seconds=0)
+
+        classroom_receipt = (
+            "ใบเสร็จรับเงิน\n"
+            "ร้านเครื่องเขียนสุขใจ\n"
+            "วันที่ 14/11/2569\n"
+            "สีเทียน ดินน้ำมัน กระดาษโปสเตอร์\n"
+            "เบิกค่าสื่อการสอนโรงเรียนอนุบาล\n"
+            "ยอดสุทธิ 320.00 บาท"
+        )
+        c_res = extract_expense_regex(classroom_receipt)
+        self.assertEqual(c_res["expense_category"], "classroom")
+        self.assertAlmostEqual(c_res["total_amount"], 320.0, places=2)
+
+        snack_receipt = (
+            "ใบเสร็จรับเงิน\n"
+            "สหกรณ์ร้านค้า\n"
+            "วันที่ 14/11/2569\n"
+            "นมโรงเรียน นมกล่อง และขนมเด็ก\n"
+            "ยอดสุทธิ 450.00 บาท"
+        )
+        s_res = extract_expense_regex(snack_receipt)
+        self.assertEqual(s_res["expense_category"], "kids_snack")
+
+        school_notice = "หนังสือแจ้งผู้ปกครอง\nโรงเรียนอนุบาลแสนสนุก\nกำหนดการทัศนศึกษาและประเมินพัฒนาการ"
+        school_intel = extract_document_intelligence(school_notice, cfg, require_expense_hint=True)
+        self.assertFalse(school_intel["is_expense"])
+        self.assertEqual(school_intel["doc_category"], "school")
+        self.assertIn("ครูอนุบาล", school_intel["tags"])
+        self.assertIn("แจ้งผู้ปกครอง", school_intel["tags"])
+
+        teaching_plan = "แผนการจัดประสบการณ์\nกิจกรรมสร้างสรรค์และเกมการศึกษาสำหรับเด็กอนุบาล"
+        teaching_intel = extract_document_intelligence(teaching_plan, cfg, require_expense_hint=True)
+        self.assertFalse(teaching_intel["is_expense"])
+        self.assertEqual(teaching_intel["doc_category"], "teaching")
+        self.assertIn("ครูอนุบาล", teaching_intel["tags"])
+
+        with make_temp_data_dir() as tmpdir:
+            app_cfg = AppConfig.from_dir(tmpdir, inbox_poll_seconds=0, auto_extract_on_ingest=True)
+            personal_receipt = "ใบเสร็จรับเงิน\nร้านกาแฟส่วนตัว\nวันที่ 14/11/2569\nยอดสุทธิ 80.00 บาท"
+
+            def multi_ocr(_img):
+                return {
+                    "text": classroom_receipt if ocr.calls == 1 else personal_receipt,
+                    "lines": [],
+                    "rotation": 0,
+                    "text_angle": 0.0,
+                }
+
+            ocr = FakeLineOCR(responder=multi_ocr)
+            test_app = create_app(config=app_cfg, engine_factory=lambda: ocr)
+            with TestClient(test_app) as client:
+                up1 = client.post(
+                    "/api/ocr",
+                    files={"file": ("teacher_bill.png", make_png_bytes(400, 500), "image/png")},
+                )
+                self.assertEqual(up1.status_code, 200)
+                self.assertEqual(up1.json()["expense"]["expense_category"], "classroom")
+                self.assertIn("ครูอนุบาล", up1.json()["tags"])
+                self.assertIn("เบิกโรงเรียน", up1.json()["tags"])
+
+                up2 = client.post(
+                    "/api/ocr",
+                    files={"file": ("my_coffee.png", make_png_bytes(400, 500), "image/png")},
+                    data={"tags": "ส่วนตัว"},
+                )
+                self.assertEqual(up2.status_code, 200)
+                self.assertIn("ส่วนตัว", up2.json()["tags"])
+
+                teacher_list = client.get("/api/expenses", params={"tag": "ครูอนุบาล"}).json()
+                self.assertEqual(len(teacher_list["expenses"]), 1)
+                self.assertAlmostEqual(teacher_list["summary"]["total_amount"], 320.0, places=2)
+
+                csv_resp = client.get("/api/expenses/export.csv", params={"tag": "ครูอนุบาล"})
+                self.assertEqual(csv_resp.status_code, 200)
+                csv_text = csv_resp.content.decode("utf-8")
+                self.assertTrue(csv_text.startswith("\ufeff"))
+                rows = list(csv.reader(io.StringIO(csv_text.lstrip("\ufeff"))))
+                self.assertEqual(rows[0][-1], "tags")
+                self.assertEqual(len(rows), 2)
+                self.assertIn("ครูอนุบาล", rows[1][-1])
+
 
 if __name__ == "__main__":
     unittest.main()

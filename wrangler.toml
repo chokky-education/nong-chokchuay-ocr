@@ -1,0 +1,31 @@
+# Cloudflare Workers Paid ($5/month) + Cloudflare Containers Deployment
+# Deploy OpenThai 2.0 ONNX + FastAPI ("น้องโชคช่วย") within the $5/mo Workers Paid budget
+# by scaling the Python OCR container down to zero after 3 minutes of idle time.
+
+name = "nong-chokchuay-ocr"
+main = "worker.js"
+compatibility_date = "2025-05-01"
+workers_dev = true
+
+[[containers]]
+class_name = "NongChokChuayOCR"
+image = "./Dockerfile"
+instance_type = "basic"
+max_instances = 2
+
+[[durable_objects.bindings]]
+name = "NONG_CHOK_CONTAINER"
+class_name = "NongChokChuayOCR"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["NongChokChuayOCR"]
+
+[vars]
+AUTO_EXTRACT_ON_INGEST = "true"
+PUBLIC_BASE_URL = "https://nong-chokchuay-ocr.workers.dev"
+
+# Secrets to configure via Wrangler CLI before deploying:
+#   npx wrangler secret put LINE_CHANNEL_SECRET
+#   npx wrangler secret put LINE_CHANNEL_ACCESS_TOKEN
+#   npx wrangler secret put LLM_API_KEY

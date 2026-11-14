@@ -3,51 +3,83 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OpenThai 2.0 OCR Studio — ระบบอ่านเอกสารภาษาไทยพร้อมฐานข้อมูลในเครื่อง</title>
+  <title>น้องโชคช่วย — ผู้ช่วยจัดการเอกสารและบิลเบิกจ่ายคุณครูอนุบาล</title>
   <link rel="stylesheet" href="/static/styles.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Mali:wght@500;600;700&family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
 
   <!-- Header -->
   <header>
     <div class="brand">
-      <div class="brand-icon">TH</div>
+      <img src="/static/mascot.jpg" alt="น้องโชคช่วย มาสคอตผู้ช่วยคุณครูอนุบาล" class="mascot-avatar">
       <div class="brand-info">
-        <h1>OpenThai 2.0 OCR Studio</h1>
-        <p>ขับเคลื่อนด้วยโมเดล OpenThai 2.0 OCR โดย iApp Technology • รันบน CPU และบันทึกลงฐานข้อมูลในเครื่อง 100%</p>
+        <h1>
+          <span>น้องโชคช่วย</span>
+          <span class="brand-pill">ผู้ช่วยคุณครูอนุบาล</span>
+        </h1>
+        <p>งานเอกสารกองโตแค่ไหน... ให้น้องโชคช่วยนะครับคุณครู</p>
       </div>
     </div>
     <div class="header-badges">
-      <button id="btn-scan-inbox" class="btn btn-secondary btn-sm" title="สแกนโฟลเดอร์ data/inbox ทันที" style="font-weight: 600; display: flex; align-items: center; gap: 0.35rem; padding: 0.4rem 0.75rem;">
-        <span>📥 สแกน Inbox</span>
-        <span id="inbox-count-badge" class="badge" style="padding: 1px 6px; font-size: 11px;">0</span>
+      <button id="btn-open-line-sim" class="btn btn-line btn-sm" title="ทดลองส่งรูปบิล เอกสารเด็ก หรือค้นหาผ่านแชท LINE OA น้องโชคช่วย">
+        <span>💬 แชท LINE น้องโชค</span>
       </button>
-      <button id="btn-open-expenses" class="btn btn-amber btn-sm" style="font-weight: 600; display: flex; align-items: center; gap: 0.35rem; padding: 0.4rem 0.8rem;">
-        <span>💰 สรุปรายจ่าย</span>
+      <button id="btn-open-expenses" class="btn btn-amber btn-sm">
+        <span>💸 สมุดเบิกจ่าย</span>
+        <span id="pending-reimb-badge" class="badge badge-reimb-pill">0 ฿</span>
       </button>
-      <button id="btn-open-db" class="btn btn-secondary btn-sm" style="font-weight: 600; display: flex; align-items: center; gap: 0.35rem; padding: 0.4rem 0.8rem; background: #e0f2fe; color: #0369a1; border-color: #bae6fd;">
-        <span>📚 คลังเอกสารในเครื่อง</span>
-        <span id="db-count-badge" class="badge" style="background: #0284c7; color: white; border: none; padding: 1px 6px; font-size: 11px;">0</span>
+      <button id="btn-open-students" class="btn btn-coral btn-sm">
+        <span>👶 แฟ้มเด็กอนุบาล</span>
+        <span id="student-count-badge" class="badge badge-coral-pill">0</span>
       </button>
-      <div class="badge badge-green">
-        <span class="badge-dot"></span>
-        <span>Local CPU Engine</span>
-      </div>
-      <div id="llm-status-badge" class="badge" title="สถานะโหมดสกัดข้อมูลรายจ่าย (Offline Regex หรือ Hybrid Text LLM)">
-        <span>⚙️ Offline Regex</span>
-      </div>
-      <div class="badge">
-        <span>💾 SQLite (FTS5)</span>
-      </div>
+      <button id="btn-open-db" class="btn btn-sky btn-sm">
+        <span>📂 ตู้เซฟเอกสาร</span>
+        <span id="db-count-badge" class="badge badge-sky-pill">0</span>
+      </button>
+      <button id="btn-scan-inbox" class="btn btn-secondary btn-sm" title="ดึงไฟล์ที่วางไว้ในโฟลเดอร์ data/inbox">
+        <span>📥 รับไฟล์จากแฟ้ม</span>
+        <span id="inbox-count-badge" class="badge">0</span>
+      </button>
     </div>
   </header>
 
-  <!-- Main Grid -->
+  <!-- Nong Chok Hero & Teacher Summary Strip -->
+  <section class="hero-strip">
+    <div class="nong-chok-bubble">
+      <img src="/static/mascot.jpg" alt="น้องโชค" class="bubble-mascot">
+      <div class="bubble-text-wrap">
+        <div class="bubble-speaker">🌤️ น้องโชคช่วยบอกคุณครูว่า:</div>
+        <p id="nong-chok-speech" class="bubble-message">สวัสดีครับคุณครู! โยนรูปบิล รูปเอกสารเด็ก หรือ PDF คำสั่งโรงเรียนเข้ามาได้เลยนะครับ เดี๋ยวน้องโชคช่วยจัดระเบียบให้เองครับ</p>
+      </div>
+    </div>
+
+    <div class="teacher-kpis">
+      <button type="button" class="teacher-kpi-card kpi-pending" id="kpi-card-pending-review" title="กดเพื่อดูเอกสารที่รอคุณครูตรวจ">
+        <div class="teacher-kpi-label">📥 รอคุณครูตรวจ</div>
+        <div class="teacher-kpi-val" id="kpi-pending-review-val">0 ฉบับ</div>
+      </button>
+      <button type="button" class="teacher-kpi-card kpi-reimb" id="kpi-card-pending-reimb" title="กดเพื่อดูยอดเงินที่รอเบิกคืนจากโรงเรียน">
+        <div class="teacher-kpi-label">💸 รอเบิกคืนโรงเรียน</div>
+        <div class="teacher-kpi-val" id="kpi-pending-reimb-val">0.00 ฿</div>
+      </button>
+      <button type="button" class="teacher-kpi-card kpi-student" id="kpi-card-students" title="กดเพื่อเปิดแฟ้มทะเบียนเด็กและข้อมูลแพ้อาหาร">
+        <div class="teacher-kpi-label">👶 เด็กในห้องเรียน</div>
+        <div class="teacher-kpi-val" id="kpi-students-val">0 คน</div>
+        <div class="teacher-kpi-sub" id="kpi-allergy-note">ยังไม่มีข้อมูลแพ้อาหาร</div>
+      </button>
+      <button type="button" class="teacher-kpi-card kpi-vault" id="kpi-card-vault" title="กดเพื่อค้นหาเอกสารทั้งหมดในตู้เซฟ">
+        <div class="teacher-kpi-label">📂 เอกสารในตู้เซฟ</div>
+        <div class="teacher-kpi-val" id="kpi-vault-val">0 ฉบับ</div>
+      </button>
+    </div>
+  </section>
+
+  <!-- Main Teacher Desk -->
   <main>
-    <!-- Left Column: Upload & Viewer -->
+    <!-- Left Column: Upload & Document Preview -->
     <div class="panel">
       <div class="panel-header">
         <div class="panel-title">
@@ -55,7 +87,7 @@
           <span id="file-badge" class="badge" style="display: none; font-size: 11px;"></span>
         </div>
         <div class="header-actions">
-          <button id="btn-select-file" class="btn btn-secondary btn-sm">เลือกไฟล์ใหม่</button>
+          <button id="btn-select-file" class="btn btn-primary btn-sm">📸 เลือกรูป / PDF</button>
           <input type="file" id="file-input" accept="image/*,application/pdf" style="display: none;">
         </div>
       </div>
@@ -63,15 +95,18 @@
       <!-- Dropzone -->
       <div class="dropzone-container" id="dropzone-area">
         <div class="dropzone" id="dropzone">
-          <div class="dropzone-icon">📥</div>
-          <div class="dropzone-title">ลากไฟล์เอกสารมาวางที่นี่ หรือคลิกเพื่อเลือกไฟล์</div>
-          <div class="dropzone-sub">รองรับรูปภาพ (PNG, JPG, WebP) และเอกสาร PDF (บันทึกลง Database ให้อัตโนมัติ)</div>
+          <div class="dropzone-icon">🌤️📥</div>
+          <div class="dropzone-title">ลากรูปบิล ใบสมัครเด็ก หรือ PDF มาวางตรงนี้ หรือกดเลือกไฟล์</div>
+          <div class="dropzone-sub">ปลอดภัย 100% เก็บในเครื่อง/คลังส่วนตัว ไม่ส่งรูปบัตรหรือสูติบัตรเด็กออกไปข้างนอก</div>
         </div>
 
         <div class="samples-bar">
-          <span class="samples-label">ลองเอกสารตัวอย่าง:</span>
-          <button class="btn-sample" data-sample="sample_official_document.png">📝 บันทึกข้อความราชการ & ตาราง</button>
-          <button class="btn-sample" data-sample="sample_budget_table.png">📊 รายงานงบประมาณรายจ่าย</button>
+          <span class="samples-label">ลองกดเล่น 1 คลิก:</span>
+          <button type="button" class="btn-sample btn-preset" data-preset="classroom_receipt">🖍️ บิลค่าสีเทียน/สื่อการสอน</button>
+          <button type="button" class="btn-sample btn-preset" data-preset="student_profile">👶 ใบประวัติเด็ก/แพ้อาหาร</button>
+          <button type="button" class="btn-sample btn-preset" data-preset="school_circular">🏫 หนังสือแจ้งผู้ปกครอง</button>
+          <button type="button" class="btn-sample" data-sample="sample_official_document.png">📝 บันทึกข้อความ</button>
+          <button type="button" class="btn-sample" data-sample="sample_budget_table.png">📊 ตารางงบ</button>
         </div>
       </div>
 
@@ -83,7 +118,7 @@
           <button class="btn btn-secondary btn-sm" id="btn-next-page">หน้าถัดไป ▶</button>
         </div>
         <div>
-          <button class="btn btn-primary btn-sm" id="btn-ocr-all-pages">⚡ อ่านทุกหน้าทั้งหมด (Batch)</button>
+          <button class="btn btn-primary btn-sm" id="btn-ocr-all-pages">⚡ อ่านทุกหน้า (ทั้งเล่ม)</button>
         </div>
       </div>
 
@@ -93,41 +128,55 @@
           <img id="doc-image" src="" alt="เอกสารต้นฉบับ" style="display: none;">
           <div id="boxes-layer"></div>
         </div>
-        <div id="viewer-placeholder" style="color: #94a3b8; text-align: center;">
-          <div style="font-size: 3rem; margin-bottom: 0.5rem;">📑</div>
-          <p>ยังไม่มีเอกสาร กรุณาอัปโหลดไฟล์หรือเลือกเอกสารตัวอย่างด้านบน</p>
+        <div id="viewer-placeholder" class="viewer-empty">
+          <img src="/static/mascot.jpg" alt="น้องโชคช่วย" class="empty-mascot">
+          <p class="empty-title">โต๊ะทำงานพร้อมแล้วครับคุณครู!</p>
+          <p class="empty-sub">ลองอัปโหลดรูปบิล รูปเอกสารเด็ก หรือกดปุ่ม "ลองกดเล่น 1 คลิก" ด้านบนดูได้เลยครับ</p>
         </div>
 
         <!-- Loading spinner -->
         <div class="loading-overlay" id="loading-overlay" style="display: none;">
           <div class="spinner"></div>
-          <div class="loading-text" id="loading-text">กำลังประมวลผล OCR ด้วย OpenThai 2.0...</div>
+          <div class="loading-text" id="loading-text">น้องโชคกำลังช่วยอ่านเอกสารให้นะครับ...</div>
         </div>
       </div>
 
       <!-- Viewer Controls -->
       <div class="viewer-controls-bar">
-        <div style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">
-          <label style="display: flex; align-items: center; gap: 0.35rem; cursor: pointer;">
-            <input type="checkbox" id="toggle-boxes" checked>
-            <span>แสดงกรอบข้อความ (Bounding Boxes)</span>
-          </label>
-          <label style="display: flex; align-items: center; gap: 0.35rem; cursor: pointer;" title="สกัดข้อมูลรายจ่ายและแท็กอัตโนมัติหลังอ่าน OCR">
+        <div class="viewer-toggles">
+          <label class="toggle-chip">
             <input type="checkbox" id="toggle-auto-extract" checked>
-            <span>Auto-extract รายจ่าย</span>
+            <span>✨ น้องโชคสรุปบิลและข้อมูลเด็กให้อัตโนมัติ</span>
+          </label>
+          <label class="toggle-chip">
+            <input type="checkbox" id="toggle-tech-mode">
+            <span>🔧 มุมมองเทคนิค</span>
+          </label>
+          <label class="toggle-chip tech-only" style="display: none;">
+            <input type="checkbox" id="toggle-boxes" checked>
+            <span>กรอบข้อความ</span>
           </label>
         </div>
         <span id="doc-dimensions" style="color: var(--text-muted); font-size: 11px;"></span>
       </div>
     </div>
 
-    <!-- Right Column: OCR Results -->
+    <!-- Right Column: Teacher Review Desk -->
     <div class="panel">
-      <!-- Stats Ribbon -->
+      <!-- Friendly Review Status Bar -->
+      <div class="review-header-bar">
+        <div class="review-status-group">
+          <span id="review-status-pill" class="badge review-pill-pending">⏳ รอคุณครูตรวจ</span>
+          <span class="review-helper-text" id="review-helper-text">ตรวจดูข้อมูลด้านล่าง ถ้าตรงแล้วกดยืนยันได้เลยครับ</span>
+        </div>
+        <button id="btn-confirm-review" class="btn btn-clover btn-sm" disabled>✅ ยืนยันตรวจแล้ว</button>
+      </div>
+
+      <!-- Mini Stats Ribbon -->
       <div class="stats-ribbon">
         <div class="stat-item">
           <div class="stat-val" id="stat-time">-</div>
-          <div class="stat-lbl">เวลาที่ใช้</div>
+          <div class="stat-lbl">เวลาอ่านเอกสาร</div>
         </div>
         <div class="stat-item">
           <div class="stat-val" id="stat-lines">-</div>
@@ -135,49 +184,77 @@
         </div>
         <div class="stat-item">
           <div class="stat-val" id="stat-conf">-</div>
-          <div class="stat-lbl">ความแม่นยำเฉลี่ย</div>
+          <div class="stat-lbl">ความคมชัด</div>
         </div>
         <div class="stat-item">
-          <div class="stat-val" id="stat-db-status">บันทึกแล้ว</div>
-          <div class="stat-lbl">สถานะฐานข้อมูล</div>
+          <div class="stat-val" id="stat-db-status">พร้อมช่วย</div>
+          <div class="stat-lbl">สถานะบันทึก</div>
         </div>
       </div>
 
       <!-- Document Metadata Bar -->
       <div class="doc-meta-bar" id="doc-meta-bar">
         <select id="doc-category-input" class="meta-input" title="หมวดหมู่เอกสาร">
-          <option value="general">📁 ทั่วไป</option>
-          <option value="receipt">🧾 ใบเสร็จ / สลิป</option>
+          <option value="general">📁 เอกสารทั่วไป</option>
+          <option value="receipt">🧾 ใบเสร็จ / สลิปเบิกจ่าย</option>
+          <option value="student">👶 ทะเบียนเด็ก / แพ้อาหาร</option>
+          <option value="school">🏫 หนังสือโรงเรียน / ผู้ปกครอง</option>
+          <option value="teaching">🎨 แผนการสอน / สื่ออนุบาล</option>
+          <option value="official">📝 บันทึกข้อความราชการ</option>
           <option value="tax">🏛️ ภาษี / บัญชี</option>
-          <option value="official">📝 เอกสารราชการ</option>
-          <option value="contract">📜 สัญญา / กฎหมาย</option>
+          <option value="contract">📜 สัญญา / ระเบียบ</option>
           <option value="manual">📘 คู่มือ / อ้างอิง</option>
         </select>
-        <input type="text" id="doc-tags-input" class="meta-input" placeholder="แท็กคั่นด้วยจุลภาค (เช่น กาแฟ, ภาษี69)">
+        <input type="text" id="doc-tags-input" class="meta-input" placeholder="ป้ายกำกับ (เช่น ครูอนุบาล, เบิกโรงเรียน, แพ้อาหาร)">
         <input type="date" id="doc-date-input" class="meta-input" title="วันที่เอกสาร">
-        <button id="btn-save-doc" class="btn btn-primary btn-sm" disabled>💾 บันทึกการแก้ไข</button>
+        <button id="btn-save-doc" class="btn btn-primary btn-sm" disabled>💾 บันทึก</button>
+      </div>
+
+      <!-- Quick Tag Bar -->
+      <div class="quick-tags-bar" id="quick-tags-bar">
+        <span class="quick-tags-label">ติดป้ายด่วน:</span>
+        <button type="button" class="btn-quick-tag" data-tag="ครูอนุบาล">👩‍🏫 ครูอนุบาล</button>
+        <button type="button" class="btn-quick-tag" data-tag="เบิกโรงเรียน">💸 เบิกโรงเรียน</button>
+        <button type="button" class="btn-quick-tag" data-tag="สื่อการสอน">🎨 สื่อการสอน</button>
+        <button type="button" class="btn-quick-tag" data-tag="ขนมเด็ก">🥛 นม/ขนมเด็ก</button>
+        <button type="button" class="btn-quick-tag" data-tag="ทะเบียนเด็ก">👶 ทะเบียนเด็ก</button>
+        <button type="button" class="btn-quick-tag" data-tag="แพ้อาหาร">⚠️ แพ้อาหาร</button>
+        <button type="button" class="btn-quick-tag" data-tag="แจ้งผู้ปกครอง">👨‍👩‍👧 แจ้งผู้ปกครอง</button>
+        <button type="button" class="btn-quick-tag" data-tag="ส่วนตัว">👤 ส่วนตัว</button>
+      </div>
+
+      <!-- Linked Student Profile Banner -->
+      <div class="student-banner" id="student-banner" style="display: none;">
+        <div class="banner-info-wrap">
+          <span id="student-banner-text">👶 กำลังอ่านข้อมูลนักเรียน...</span>
+          <span id="student-allergy-badge" class="badge badge-allergy" style="display: none;"></span>
+        </div>
+        <button id="btn-view-in-students" class="btn btn-coral btn-sm">👶 ดูในแฟ้มเด็ก</button>
       </div>
 
       <!-- Linked Expense Strip -->
       <div class="expense-banner" id="expense-banner" style="display: none;">
         <span id="expense-banner-text">🧾 ยังไม่มีข้อมูลรายจ่าย</span>
-        <button id="btn-view-in-expenses" class="btn btn-secondary btn-sm">เปิดดูในตารางรายจ่าย</button>
+        <div class="banner-actions">
+          <button id="btn-mark-reimbursed-inline" class="btn btn-clover btn-sm" style="display: none;">💸 เบิกคืนแล้ว</button>
+          <button id="btn-view-in-expenses" class="btn btn-secondary btn-sm">เปิดสมุดเบิกจ่าย</button>
+        </div>
       </div>
 
       <!-- Tabs Header -->
       <div class="tabs-header">
         <button class="tab-btn active" data-tab="tab-text">📝 ข้อความที่อ่านได้</button>
-        <button class="tab-btn" data-tab="tab-lines">📋 ตารางบรรทัด & ค่าความมั่นใจ</button>
-        <button class="tab-btn" data-tab="tab-markdown">📊 รูปแบบ Markdown</button>
-        <button class="tab-btn" data-tab="tab-json">⚙️ JSON</button>
+        <button class="tab-btn" data-tab="tab-lines">📋 อ่านทีละบรรทัด</button>
+        <button class="tab-btn tech-only" data-tab="tab-markdown" style="display: none;">📊 Markdown</button>
+        <button class="tab-btn tech-only" data-tab="tab-json" style="display: none;">⚙️ JSON</button>
       </div>
 
       <!-- Tab: Plain Text -->
       <div class="tab-content active" id="tab-text">
-        <textarea id="ocr-text-result" class="ocr-textarea" placeholder="ผลลัพธ์ข้อความภาษาไทยที่อ่านได้จะปรากฏที่นี่..."></textarea>
-        <div style="margin-top: 0.5rem; display: flex; justify-content: space-between; font-size: 0.8125rem; color: var(--text-muted);">
+        <textarea id="ocr-text-result" class="ocr-textarea" placeholder="ข้อความภาษาไทยที่น้องโชคช่วยอ่านได้ จะแสดงตรงนี้เพื่อให้คุณครูแก้ไขหรือคัดลอกไปใช้งานต่อได้เลยครับ..."></textarea>
+        <div class="textarea-footer-meta">
           <span id="char-count">0 ตัวอักษร | 0 คำ</span>
-          <span>💾 จัดเก็บลง SQLite Database พร้อม Full-Text Search ให้โดยอัตโนมัติ</span>
+          <span id="llm-status-badge" class="badge badge-soft">⚙️ อ่านออฟไลน์ในเครื่อง</span>
         </div>
       </div>
 
@@ -189,119 +266,139 @@
               <tr>
                 <th style="width: 50px;">#</th>
                 <th>ข้อความที่ตรวจพบ</th>
-                <th style="width: 90px;">ความมั่นใจ</th>
+                <th style="width: 90px;">ความคมชัด</th>
               </tr>
             </thead>
             <tbody id="lines-tbody">
               <tr>
-                <td colspan="3" style="text-align: center; color: var(--text-muted); padding: 2rem;">ไม่มีข้อมูล</td>
+                <td colspan="3" style="text-align: center; color: var(--text-muted); padding: 2rem;">ยังไม่มีข้อมูล</td>
               </tr>
             </tbody>
           </table>
         </div>
       </div>
 
-      <!-- Tab: Markdown -->
+      <!-- Tab: Markdown (Tech Mode) -->
       <div class="tab-content" id="tab-markdown">
         <textarea id="ocr-markdown-result" class="ocr-textarea" style="font-family: var(--font-mono); font-size: 0.875rem;" placeholder="Markdown..."></textarea>
       </div>
 
-      <!-- Tab: Raw JSON -->
+      <!-- Tab: Raw JSON (Tech Mode) -->
       <div class="tab-content" id="tab-json">
         <textarea id="ocr-json-result" class="ocr-textarea" style="font-family: var(--font-mono); font-size: 0.8125rem;" readonly placeholder="{ ... }"></textarea>
       </div>
 
       <!-- Action Footer -->
       <div class="panel-footer">
-        <div style="font-size: 0.8125rem; color: var(--text-muted);">
-          <span id="footer-doc-id">โมเดล: OpenThai 2.0 OCR Text</span>
+        <div style="font-size: 0.75rem; color: var(--text-muted);">
+          <span id="footer-doc-id">ผู้ช่วย: น้องโชคช่วย (OpenThai 2.0)</span>
         </div>
         <div class="action-buttons">
-          <button id="btn-extract-expense" class="btn btn-amber btn-sm" disabled>🧾 สกัดบิล/รายจ่าย</button>
-          <a id="btn-download-source" href="#" download class="btn btn-secondary btn-sm" style="display: none; text-decoration: none;">📎 ไฟล์ต้นฉบับ</a>
+          <button id="btn-extract-expense" class="btn btn-amber btn-sm" disabled>🧾 ดึงยอดบิล/ข้อมูลเด็ก</button>
+          <a id="btn-download-source" href="#" download class="btn btn-secondary btn-sm" style="display: none; text-decoration: none;">📎 รูปต้นฉบับ</a>
           <button id="btn-copy" class="btn btn-primary btn-sm">📋 คัดลอกข้อความ</button>
-          <button id="btn-download-txt" class="btn btn-secondary btn-sm">💾 บันทึก .txt</button>
-          <button id="btn-download-json" class="btn btn-secondary btn-sm">📦 บันทึก .json</button>
+          <button id="btn-download-txt" class="btn btn-secondary btn-sm tech-only" style="display: none;">💾 .txt</button>
+          <button id="btn-download-json" class="btn btn-secondary btn-sm tech-only" style="display: none;">📦 .json</button>
         </div>
       </div>
     </div>
   </main>
 
-  <!-- Database Modal Drawer -->
+  <!-- Modal 1: Document Safe Vault -->
   <div class="modal-backdrop" id="db-modal" style="display: none;">
     <div class="modal-content">
       <div class="modal-header">
         <div style="display: flex; align-items: center; gap: 0.5rem;">
-          <h2 style="font-size: 1.125rem; font-weight: 700;">📚 คลังเอกสารในเครื่อง (Local Database)</h2>
-          <span class="badge badge-green">SQLite FTS5</span>
+          <h2 class="modal-title-mali">📂 ตู้เซฟเอกสารโรงเรียน & ถาดรอตรวจ</h2>
+          <span class="badge badge-sky-pill">ไม่มีวันหมดอายุ</span>
         </div>
         <div style="display: flex; align-items: center; gap: 0.5rem;">
-          <a href="/api/database/download" class="btn btn-secondary btn-sm" download style="text-decoration: none;">📥 ดาวน์โหลดไฟล์ .db</a>
+          <a href="/api/database/download" class="btn btn-secondary btn-sm" download style="text-decoration: none;">📥 สำรองฐานข้อมูล</a>
           <button id="btn-close-db" class="btn btn-secondary btn-sm">✕ ปิด</button>
         </div>
       </div>
 
       <div class="modal-body">
-        <!-- Search bar & filters -->
-        <div class="vault-filters">
-          <input type="text" id="db-search-input" class="search-input" placeholder="🔍 ค้นหาคำในเอกสารทั้งหมด (เช่น 'งบประมาณ', 'ราชกิจจาฯ')...">
+        <div class="vault-filters vault-filters-5">
+          <input type="text" id="db-search-input" class="search-input" placeholder="🔍 ค้นหาคำในเอกสาร (เช่น 'ทัศนศึกษา', 'สีเทียน', 'น้องมะลิ')...">
+          <select id="db-review-filter" class="meta-input" style="height: 38px;">
+            <option value="">ทุกสถานะตรวจ</option>
+            <option value="pending_review">⏳ รอคุณครูตรวจ</option>
+            <option value="reviewed">✅ ตรวจแล้ว</option>
+          </select>
           <select id="db-category-filter" class="meta-input" style="height: 38px;">
             <option value="">ทุกหมวดหมู่</option>
-            <option value="general">📁 ทั่วไป</option>
             <option value="receipt">🧾 ใบเสร็จ / สลิป</option>
-            <option value="tax">🏛️ ภาษี / บัญชี</option>
+            <option value="student">👶 ทะเบียนเด็ก / แพ้อาหาร</option>
+            <option value="school">🏫 เอกสารโรงเรียน / ผู้ปกครอง</option>
+            <option value="teaching">🎨 แผนการสอน / สื่ออนุบาล</option>
             <option value="official">📝 เอกสารราชการ</option>
+            <option value="tax">🏛️ ภาษี / บัญชี</option>
             <option value="contract">📜 สัญญา / กฎหมาย</option>
             <option value="manual">📘 คู่มือ / อ้างอิง</option>
+            <option value="general">📁 ทั่วไป</option>
           </select>
-          <input type="text" id="db-tag-filter" class="meta-input" style="height: 38px;" placeholder="🏷️ กรองตามแท็ก...">
-          <button id="btn-clear-search" class="btn btn-secondary btn-sm" style="height: 38px;">ล้างตัวกรอง</button>
+          <input type="text" id="db-tag-filter" class="meta-input" style="height: 38px;" placeholder="🏷️ กรองป้ายกำกับ...">
+          <button id="btn-clear-search" class="btn btn-secondary btn-sm" style="height: 38px;">ดูทั้งหมด</button>
         </div>
 
-        <!-- Database stats bar -->
         <div id="db-summary-stats" style="font-size: 0.8125rem; color: var(--text-muted); margin-bottom: 1rem;">
-          กำลังโหลดข้อมูลฐานข้อมูล...
+          กำลังเปิดตู้เซฟเอกสาร...
         </div>
 
-        <!-- Documents list -->
-        <div class="docs-list" id="docs-list">
-          <!-- Filled dynamically by JavaScript -->
-        </div>
+        <div class="docs-list" id="docs-list"></div>
       </div>
     </div>
   </div>
 
-  <!-- Expense Dashboard Modal -->
+  <!-- Modal 2: Teacher Reimbursement & Expense Ledger -->
   <div class="modal-backdrop" id="expense-modal" style="display: none;">
-    <div class="modal-content" style="max-width: 1100px;">
+    <div class="modal-content" style="max-width: 1160px;">
       <div class="modal-header">
         <div style="display: flex; align-items: center; gap: 0.5rem;">
-          <h2 style="font-size: 1.125rem; font-weight: 700;">💰 ตารางสรุปรายจ่าย & ใบเสร็จ (Expense Tracker)</h2>
-          <span class="badge" style="background: #fffbeb; color: #b45309; border-color: #fde68a;">Offline + Hybrid</span>
+          <h2 class="modal-title-mali">💸 สมุดเบิกจ่ายห้องเรียน & เงินสำรองจ่ายคุณครู</h2>
         </div>
         <div style="display: flex; align-items: center; gap: 0.5rem;">
-          <a id="btn-export-expenses-csv" href="/api/expenses/export.csv" download class="btn btn-secondary btn-sm" style="text-decoration: none;">📥 Export CSV (Excel)</a>
+          <a id="btn-export-expenses-csv" href="/api/expenses/export.csv" download class="btn btn-primary btn-sm" style="text-decoration: none;">📊 ส่งออก Excel (CSV)</a>
           <button id="btn-close-expenses" class="btn btn-secondary btn-sm">✕ ปิด</button>
         </div>
       </div>
       <div class="modal-body">
-        <div class="vault-filters" style="grid-template-columns: 180px 180px auto 1fr;">
+        <div class="vault-filters vault-filters-exp">
           <input type="month" id="expense-month-filter" class="meta-input" style="height: 36px;">
+          <select id="expense-reimb-filter" class="meta-input" style="height: 36px;">
+            <option value="">ทุกสถานะการเบิก</option>
+            <option value="pending_reimbursement">💸 รอเบิกคืนโรงเรียน</option>
+            <option value="reimbursed">✅ เบิกคืนแล้ว</option>
+            <option value="personal">👤 จ่ายส่วนตัว</option>
+          </select>
           <select id="expense-category-filter" class="meta-input" style="height: 36px;">
             <option value="">ทุกหมวดรายจ่าย</option>
+            <option value="classroom">🎨 สื่อการสอน / ห้องเรียน</option>
+            <option value="kids_snack">🥛 นม / ขนมเด็ก</option>
             <option value="food">🍜 อาหาร / กาแฟ</option>
             <option value="transport">🚕 เดินทาง / น้ำมัน</option>
-            <option value="utilities">💡 สาธารณูปโภค / เน็ต</option>
-            <option value="office">📎 อุปกรณ์สำนักงาน / ซอฟต์แวร์</option>
+            <option value="utilities">💡 ค่าน้ำ / ค่าไฟ / เน็ต</option>
+            <option value="office">📎 อุปกรณ์สำนักงาน</option>
             <option value="other">📦 อื่นๆ</option>
           </select>
+          <select id="expense-tag-filter" class="meta-input" style="height: 36px;" title="กรองตามป้ายกำกับ">
+            <option value="">ทุกป้ายกำกับ</option>
+            <option value="ครูอนุบาล">👩‍🏫 ครูอนุบาล</option>
+            <option value="เบิกโรงเรียน">💸 เบิกโรงเรียน</option>
+            <option value="สื่อการสอน">🎨 สื่อการสอน</option>
+            <option value="ส่วนตัว">👤 ส่วนตัว</option>
+          </select>
           <button id="btn-clear-expense-filters" class="btn btn-secondary btn-sm" style="height: 36px;">ดูทั้งหมด</button>
-          <div></div>
         </div>
 
-        <div class="expense-kpis">
+        <div class="expense-kpis expense-kpis-5">
+          <div class="kpi-card kpi-card-reimb">
+            <div class="kpi-label">💸 รอเบิกคืนโรงเรียน (บาท)</div>
+            <div class="kpi-value" id="exp-kpi-pending-reimb" style="color: #ea580c;">0.00</div>
+          </div>
           <div class="kpi-card">
-            <div class="kpi-label">จำนวนรายการ</div>
+            <div class="kpi-label">จำนวนบิล</div>
             <div class="kpi-value" id="exp-kpi-count">0</div>
           </div>
           <div class="kpi-card">
@@ -313,7 +410,7 @@
             <div class="kpi-value" id="exp-kpi-vat">0.00</div>
           </div>
           <div class="kpi-card">
-            <div class="kpi-label">ยอดสุทธิรวม (THB)</div>
+            <div class="kpi-label">ยอดรวมทั้งหมด (THB)</div>
             <div class="kpi-value" id="exp-kpi-total" style="color: #b45309;">0.00</div>
           </div>
         </div>
@@ -323,17 +420,17 @@
             <thead>
               <tr>
                 <th>วันที่</th>
-                <th>ร้านค้า / ผู้รับ</th>
+                <th>ร้านค้า / รายการ</th>
                 <th>หมวด</th>
+                <th>สถานะการเบิก</th>
                 <th>ก่อน VAT</th>
                 <th>VAT</th>
                 <th>ยอดรวม</th>
-                <th>วิธีสกัด</th>
                 <th>จัดการ</th>
               </tr>
             </thead>
             <tbody id="expenses-tbody">
-              <tr><td colspan="8" style="text-align: center; color: var(--text-muted); padding: 2rem;">ยังไม่มีรายการรายจ่าย</td></tr>
+              <tr><td colspan="8" style="text-align: center; color: var(--text-muted); padding: 2rem;">ยังไม่มีรายการเบิกจ่าย</td></tr>
             </tbody>
           </table>
         </div>
@@ -341,10 +438,128 @@
     </div>
   </div>
 
+  <!-- Modal 3: Kindergarten Student Roster & Allergy Alert -->
+  <div class="modal-backdrop" id="student-modal" style="display: none;">
+    <div class="modal-content" style="max-width: 1120px;">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <h2 class="modal-title-mali">👶 แฟ้มทะเบียนเด็กอนุบาล & ข้อมูลฉุกเฉินผู้ปกครอง</h2>
+        </div>
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <a id="btn-export-students-csv" href="/api/students/export.csv" download class="btn btn-primary btn-sm" style="text-decoration: none;">📊 ส่งออกรายชื่อ Excel (CSV)</a>
+          <button id="btn-close-students" class="btn btn-secondary btn-sm">✕ ปิด</button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="expense-kpis" style="grid-template-columns: repeat(3, 1fr);">
+          <div class="kpi-card">
+            <div class="kpi-label">👶 เด็กในแฟ้มทั้งหมด</div>
+            <div class="kpi-value" id="stu-kpi-total">0 คน</div>
+          </div>
+          <div class="kpi-card kpi-card-allergy">
+            <div class="kpi-label">⚠️ เด็กที่ต้องระวังแพ้อาหาร / โรคประจำตัว</div>
+            <div class="kpi-value" id="stu-kpi-allergy" style="color: #e11d48;">0 คน</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">🏫 ห้องเรียนที่ดูแล</div>
+            <div class="kpi-value" id="stu-kpi-rooms">-</div>
+          </div>
+        </div>
+
+        <div class="vault-filters" style="grid-template-columns: 1fr 160px auto auto auto;">
+          <input type="text" id="student-search-input" class="search-input" placeholder="🔍 ค้นหาชื่อเด็ก ชื่อเล่น เลข 13 หลัก เบอร์ผู้ปกครอง หรือสิ่งที่แพ้...">
+          <input type="text" id="student-classroom-filter" class="meta-input" style="height: 38px;" placeholder="ห้องเรียน (เช่น อนุบาล 2/1)">
+          <label class="toggle-chip" style="height: 38px;">
+            <input type="checkbox" id="student-allergy-only">
+            <span>⚠️ เฉพาะเด็กแพ้อาหาร</span>
+          </label>
+          <button id="btn-toggle-add-student" class="btn btn-coral btn-sm" style="height: 38px;">+ เพิ่มชื่อเด็ก</button>
+          <button id="btn-clear-student-filters" class="btn btn-secondary btn-sm" style="height: 38px;">ดูทั้งหมด</button>
+        </div>
+
+        <!-- Inline Add/Edit Student Form -->
+        <form id="student-form" class="student-form-card" style="display: none;">
+          <input type="hidden" id="stu-edit-id">
+          <div class="student-form-grid">
+            <input type="text" id="stu-full-name" class="meta-input" placeholder="ชื่อ-นามสกุล (เช่น เด็กหญิงมะลิ ใจดี)" required>
+            <input type="text" id="stu-nickname" class="meta-input" placeholder="ชื่อเล่น (เช่น น้องมะลิ)">
+            <input type="text" id="stu-citizen-id" class="meta-input" placeholder="เลขบัตร ปชช. 13 หลัก">
+            <input type="date" id="stu-birth-date" class="meta-input" title="วันเกิด">
+            <input type="text" id="stu-classroom" class="meta-input" placeholder="ห้องเรียน (เช่น อนุบาล 2/1)" value="อนุบาล">
+            <input type="text" id="stu-parent-name" class="meta-input" placeholder="ชื่อผู้ปกครอง">
+            <input type="text" id="stu-parent-phone" class="meta-input" placeholder="เบอร์โทรฉุกเฉินผู้ปกครอง">
+            <input type="text" id="stu-allergies" class="meta-input" placeholder="⚠️ แพ้อาหาร (เช่น แพ้นมวัว, แพ้ถั่ว)">
+            <input type="text" id="stu-medical" class="meta-input" placeholder="โรคประจำตัว / ข้อควรระวัง">
+          </div>
+          <div style="display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 0.75rem;">
+            <button type="button" id="btn-cancel-student-form" class="btn btn-secondary btn-sm">ยกเลิก</button>
+            <button type="submit" class="btn btn-primary btn-sm">💾 บันทึกข้อมูลเด็ก</button>
+          </div>
+        </form>
+
+        <div id="students-list" class="docs-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal 4: Interactive LINE OA Simulator ("น้องโชคช่วย LINE OA") -->
+  <div class="modal-backdrop" id="line-sim-modal" style="display: none;">
+    <div class="modal-content line-sim-shell">
+      <div class="line-sim-header">
+        <div style="display: flex; align-items: center; gap: 0.65rem;">
+          <img src="/static/mascot.jpg" alt="น้องโชคช่วย LINE OA" class="line-avatar">
+          <div>
+            <div style="font-weight: 700; font-size: 1rem;">น้องโชคช่วย (LINE OA)</div>
+            <div style="font-size: 0.75rem; opacity: 0.85;">จำลองการส่งรูปบิล / เอกสารเด็ก / ค้นหาจากมือถือคุณครู</div>
+          </div>
+        </div>
+        <button id="btn-close-line-sim" class="btn btn-sm" style="background: rgba(255,255,255,0.2); color: white; border: none;">✕ ปิด</button>
+      </div>
+
+      <div class="line-chat-messages" id="line-chat-messages">
+        <div class="line-msg line-msg-bot">
+          <img src="/static/mascot.jpg" alt="น้องโชค" class="line-msg-avatar">
+          <div class="line-bubble line-bubble-bot">
+            สวัสดีครับคุณครู! 🌤️ นี่คือแชท LINE OA ของน้องโชคช่วยครับ<br>
+            คุณครูลองกดส่งรูปบิลจากร้านค้า หรือกดปุ่มเมนูลัดด้านล่างเพื่อดูการทำงานบนมือถือได้เลยนะครับ
+          </div>
+        </div>
+      </div>
+
+      <!-- LINE Chat Composer -->
+      <div class="line-composer">
+        <button type="button" id="btn-line-sim-photo" class="btn btn-secondary btn-sm" title="ส่งรูปบิลหรือเอกสารเข้าแชท LINE">📎 ส่งรูป/PDF</button>
+        <input type="file" id="line-sim-file-input" accept="image/*,application/pdf" style="display: none;">
+        <input type="text" id="line-sim-text-input" class="search-input" placeholder="พิมพ์ถึงน้องโชค (เช่น ยอดรอเบิก, แพ้อาหาร, ค้นหา สีเทียน)...">
+        <button type="button" id="btn-line-sim-send" class="btn btn-line btn-sm">ส่ง</button>
+      </div>
+
+      <!-- LINE OA Rich Menu -->
+      <div class="line-rich-menu">
+        <button type="button" class="rich-menu-btn" data-line-preset="classroom_receipt">
+          <span class="rm-icon">🧾</span>
+          <span>ส่งรูปบิลตัวอย่าง</span>
+        </button>
+        <button type="button" class="rich-menu-btn" data-line-preset="student_profile">
+          <span class="rm-icon">👶</span>
+          <span>ส่งใบเด็กตัวอย่าง</span>
+        </button>
+        <button type="button" class="rich-menu-btn" data-line-cmd="ยอดรอเบิก">
+          <span class="rm-icon">💸</span>
+          <span>เช็กยอดรอเบิก</span>
+        </button>
+        <button type="button" class="rich-menu-btn" data-line-cmd="แพ้อาหาร">
+          <span class="rm-icon">⚠️</span>
+          <span>เช็กเด็กแพ้อาหาร</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Toast Notification -->
   <div class="toast" id="toast">
     <span id="toast-icon">✅</span>
-    <span id="toast-message">คัดลอกข้อความสำเร็จ</span>
+    <span id="toast-message">บันทึกข้อมูลสำเร็จ</span>
   </div>
 
   <script src="/static/app.js"></script>

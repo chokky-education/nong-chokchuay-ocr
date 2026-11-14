@@ -168,6 +168,31 @@ class LlmHybridAdapterTest(unittest.TestCase):
                     self.assertEqual(up.json()["expense"]["merchant"], "Local Cafe")
                 self.assertEqual(mock_post.call_count, 1)
 
+    def test_from_env_defaults_auto_extract_true_and_supports_gemini_key_fallback(self) -> None:
+        import os
+        import config
+
+        with make_temp_data_dir() as tmpdir:
+            env_path = os.path.join(tmpdir, ".env")
+            with open(env_path, "w", encoding="utf-8") as fh:
+                fh.write("LLM_API_KEY=\n")
+                fh.write("GEMINI_API_KEY=from-dotenv-gemini-key\n")
+
+            with patch.object(config, "BASE_DIR", tmpdir):
+                with patch.dict(os.environ, {"OPENTHAI_DATA_DIR": tmpdir}, clear=True):
+                    cfg = AppConfig.from_env()
+                    self.assertTrue(cfg.auto_extract_on_ingest)
+                    self.assertEqual(cfg.llm_api_key, "from-dotenv-gemini-key")
+
+            # Also ensure a later non-empty LLM_API_KEY overrides an earlier empty LLM_API_KEY= line
+            with open(env_path, "a", encoding="utf-8") as fh:
+                fh.write("LLM_API_KEY=later-nonempty-key\n")
+
+            with patch.object(config, "BASE_DIR", tmpdir):
+                with patch.dict(os.environ, {"OPENTHAI_DATA_DIR": tmpdir}, clear=True):
+                    cfg2 = AppConfig.from_env()
+                    self.assertEqual(cfg2.llm_api_key, "later-nonempty-key")
+
 
 if __name__ == "__main__":
     unittest.main()
