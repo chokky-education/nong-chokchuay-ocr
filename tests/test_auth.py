@@ -1,8 +1,10 @@
 import os
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import config
+import database
 from config import AppConfig
 from tests.fakes import make_temp_data_dir
 
@@ -63,6 +65,52 @@ class AuthConfigTests(unittest.TestCase):
                 ):
                     with self.assertRaises(ValueError):
                         AppConfig.from_env()
+
+
+class AuthSessionDbTests(unittest.TestCase):
+    def test_auth_sessions_idempotent_init_create_expiry_and_revocation(self) -> None:
+        with make_temp_data_dir() as tmpdir:
+            db_path = os.path.join(tmpdir, "documents.db")
+            database.init_db(db_path)
+
+            now = datetime.now(timezone.utc)
+            future_iso = (now + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            past_iso = (now - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            created = database.create_auth_session(
+                session_id="sid-active-1",
+                email="cgikchik07@gmail.com",
+                name="Owner",
+                picture="https://example.com/p.jpg",
+                csrf_token="csrf-abc",
+                expires_at=future_iso,
+                db_path=db_path,
+            )
+            self.assertEqual(created["email"], "cgikchik07@gmail.com")
+            self.assertEqual(created["csrf_token"], "csrf-abc")
+
+            # Idempotent init_db must preserve active sessions
+            database.init_db(db_path)
+            active = database.get_active_auth_session("sid-active-1", now_iso=now.isoformat(), db_path=db_path)
+            self.assertIsNotNone(active)
+            self.assertEqual(active["email"], "cgikchik07@gmail.com")
+
+            # Expired session returns None
+            database.create_auth_session(
+                session_id="sid-expired-1",
+                email="ppksaruenee@gmail.com",
+                name="Teacher",
+                picture="",
+                csrf_token="csrf-exp",
+                expires_at=past_iso,
+                db_path=db_path,
+            )
+            self.assertIsNone(database.get_active_auth_session("sid-expired-1", db_path=db_path))
+
+            # Revoked session immediately returns None
+            self.assertTrue(database.revoke_auth_session("sid-active-1", db_path=db_path))
+            self.assertFalse(database.revoke_auth_session("sid-missing", db_path=db_path))
+            self.assertIsNone(database.get_active_auth_session("sid-active-1", db_path=db_path))
 
 
 if __name__ == "__main__":

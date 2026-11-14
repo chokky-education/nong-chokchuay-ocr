@@ -2,7 +2,7 @@ import json
 import os
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
 DB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -241,6 +241,20 @@ def init_db(db_path: Optional[str] = None) -> None:
         FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE SET NULL
     );
     """)
+
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS auth_sessions (
+        session_id TEXT PRIMARY KEY,
+        email TEXT NOT NULL,
+        name TEXT DEFAULT '',
+        picture TEXT DEFAULT '',
+        csrf_token TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        revoked_at TEXT DEFAULT ''
+    );
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at)")
 
     conn.commit()
     conn.close()
@@ -1064,3 +1078,139 @@ def get_db_stats(db_path: Optional[str] = None) -> Dict[str, Any]:
         "pending_reimbursement_total": round(float(exp_row["pending_reimbursement_total"] or 0.0), 2) if exp_row else 0.0,
         "db_path": target_path,
     }
+
+
+def _utc_iso(dt: Optional[datetime] = None) -> str:
+    target = dt or datetime.now(timezone.utc)
+    if target.tzinfo is None:
+        target = target.replace(tzinfo=timezone.utc)
+    else:
+        target = target.astimezone(timezone.utc)
+    return target.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_utc_dt(raw: str) -> Optional[datetime]:
+    cleaned = (raw or "").strip()
+    if not cleaned:
+        return None
+    if cleaned.endswith("Z"):
+        cleaned = cleaned[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(cleaned)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def purge_expired_auth_sessions(now_iso: Optional[str] = None, db_path: Optional[str] = None) -> int:
+    """Delete expired or revoked auth sessions older than now_iso."""
+    now_dt = _parse_utc_dt(now_iso) if now_iso else datetime.now(timezone.utc)
+    cutoff = _utc_iso(now_dt)
+    conn = get_db_connection(db_path)
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM auth_sessions WHERE expires_at <= ?",
+        (cutoff,),
+    )
+    removed = cur.rowcount or 0
+    conn.commit()
+    conn.close()
+    return removed
+
+
+def create_auth_session(
+    session_id: str,
+    email: str,
+    name: str,
+    picture: str,
+    csrf_token: str,
+    expires_at: str,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Persist a new revocable auth session and purge expired sessions."""
+    now_str = _utc_iso()
+    exp_dt = _parse_utc_dt(expires_at)
+    exp_str = _utc_iso(exp_dt) if exp_dt is not None else expires_at
+    clean_email = (email or "").strip().lower()
+
+    conn = get_db_connection(db_path)
+    conn.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (now_str,))
+    conn.execute(
+        """
+        INSERT INTO auth_sessions (
+            session_id, email, name, picture, csrf_token, created_at, expires_at, revoked_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, '')
+        """,
+        (session_id, clean_email, name or "", picture or "", csrf_token, now_str, exp_str),
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "session_id": session_id,
+        "email": clean_email,
+        "name": name or "",
+        "picture": picture or "",
+        "csrf_token": csrf_token,
+        "created_at": now_str,
+        "expires_at": exp_str,
+        "revoked_at": "",
+    }
+
+
+def get_active_auth_session(
+    session_id: str,
+    now_iso: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Fetch an unrevoked, unexpired auth session row or None."""
+    if not session_id:
+        return None
+    now_dt = _parse_utc_dt(now_iso) if now_iso else datetime.now(timezone.utc)
+    if now_dt is None:
+        now_dt = datetime.now(timezone.utc)
+
+    conn = get_db_connection(db_path)
+    row = conn.execute(
+        """
+        SELECT session_id, email, name, picture, csrf_token, created_at, expires_at, revoked_at
+        FROM auth_sessions
+        WHERE session_id = ?
+        """,
+        (session_id,),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    if (row["revoked_at"] or "").strip():
+        return None
+    exp_dt = _parse_utc_dt(row["expires_at"])
+    if exp_dt is None or exp_dt <= now_dt:
+        return None
+    return dict(row)
+
+
+def revoke_auth_session(
+    session_id: str,
+    revoked_at: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> bool:
+    """Mark an auth session as revoked immediately; returns True if an active row was updated."""
+    if not session_id:
+        return False
+    rev_dt = _parse_utc_dt(revoked_at) if revoked_at else datetime.now(timezone.utc)
+    rev_str = _utc_iso(rev_dt)
+    conn = get_db_connection(db_path)
+    cur = conn.execute(
+        """
+        UPDATE auth_sessions
+        SET revoked_at = ?
+        WHERE session_id = ? AND COALESCE(revoked_at, '') = ''
+        """,
+        (rev_str, session_id),
+    )
+    updated = (cur.rowcount or 0) > 0
+    conn.commit()
+    conn.close()
+    return updated
