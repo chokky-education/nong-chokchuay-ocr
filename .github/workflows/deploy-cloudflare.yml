@@ -29,6 +29,17 @@ jobs:
       - name: Run unit and integration tests
         run: python -m unittest discover -s tests -v
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run Node worker and frontend auth tests
+        run: |
+          node --check worker.js
+          node --check static/app.js
+          node --test tests/test_worker_js.mjs tests/test_frontend_auth.mjs
+
   deploy-cloudflare:
     needs: test
     if: github.event_name != 'pull_request'
