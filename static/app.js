@@ -45,12 +45,18 @@
 
   const STATE_CHANGING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
+  const UNAUTHORIZED_EMAIL_MSG =
+    'บัญชี Google นี้ไม่ได้รับอนุญาตให้ใช้งานระบบ กรุณาใช้อีเมลที่ลงทะเบียนไว้เท่านั้น';
+  const NOT_CONFIGURED_MSG = 'ระบบยังไม่ได้ตั้งค่า Google OAuth กรุณาติดต่อผู้ดูแลระบบ';
+
   const AUTH_ERROR_MESSAGES = {
     access_denied: 'ยกเลิกการเข้าสู่ระบบด้วย Google หรือไม่ได้รับอนุญาต',
-    email_not_allowed: 'บัญชี Google นี้ไม่ได้รับอนุญาตให้ใช้งานระบบ กรุณาใช้อีเมลที่ลงทะเบียนไว้เท่านั้น',
+    unauthorized_email: UNAUTHORIZED_EMAIL_MSG,
+    email_not_allowed: UNAUTHORIZED_EMAIL_MSG,
     email_unverified: 'อีเมล Google นี้ยังไม่ได้รับการยืนยัน กรุณายืนยันอีเมลก่อนเข้าใช้งาน',
     invalid_state: 'คำขอเข้าสู่ระบบหมดอายุหรือยืนยันความปลอดภัยไม่สำเร็จ กรุณากดเข้าสู่ระบบใหม่อีกครั้ง',
-    oauth_not_configured: 'ระบบยังไม่ได้ตั้งค่า Google OAuth กรุณาติดต่อผู้ดูแลระบบ',
+    not_configured: NOT_CONFIGURED_MSG,
+    oauth_not_configured: NOT_CONFIGURED_MSG,
     oauth_failed: 'เชื่อมต่อ Google Sign-In ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง',
   };
 
@@ -413,7 +419,7 @@
         showAuthenticatedWorkspace({
           required: isRequired,
           authenticated: isAuthed,
-          email: me.email || '',
+          email: me.user?.email || me.email || '',
           csrfToken: me.csrf_token || '',
         });
         return true;

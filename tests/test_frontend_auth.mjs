@@ -163,12 +163,18 @@ function runFrontendApp({ search = '', userAgent = 'Mozilla/5.0 Chrome/120.0', f
 test('unauthenticated init calls zero data APIs, renders auth_error via textContent, and detects LINE WebView', async () => {
   const fetchCalls = [];
   const { getEl, body, replaceStateCalls } = runFrontendApp({
-    search: '?auth_error=email_not_allowed',
+    search: '?auth_error=unauthorized_email',
     userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) Line/14.2.0',
     fetchImpl: async (url, options = {}) => {
       fetchCalls.push({ url, options });
       if (url === '/api/auth/me') {
-        return jsonResponse(200, { authenticated: false, auth_required: true, csrf_token: null });
+        return jsonResponse(200, {
+          authenticated: false,
+          auth_required: true,
+          oauth_configured: true,
+          csrf_token: null,
+          user: null,
+        });
       }
       throw new Error(`Unexpected unauthenticated fetch to ${url}`);
     },
@@ -188,6 +194,19 @@ test('unauthenticated init calls zero data APIs, renders auth_error via textCont
   assert.equal(getEl('auth-webview-warning').hidden, false);
   assert.equal(replaceStateCalls.length, 1);
   assert.ok(!replaceStateCalls[0].includes('auth_error='));
+
+  // Backend not_configured code also maps to specific OAuth config Thai message
+  const notCfgRun = runFrontendApp({
+    search: '?auth_error=not_configured',
+    fetchImpl: async (url) => {
+      if (url === '/api/auth/me') {
+        return jsonResponse(200, { authenticated: false, auth_required: true, csrf_token: null, user: null });
+      }
+      throw new Error(`Unexpected fetch to ${url}`);
+    },
+  });
+  await flushMicrotasks();
+  assert.match(notCfgRun.getEl('auth-error-banner').textContent, /Google OAuth/);
 });
 
 test('authenticated session attaches X-CSRF-Token on POST and wipes DOM/state on 401', async () => {
@@ -201,8 +220,13 @@ test('authenticated session attaches X-CSRF-Token on POST and wipes DOM/state on
         return jsonResponse(200, {
           authenticated: true,
           auth_required: true,
-          email: 'cgikchik07@gmail.com',
+          oauth_configured: true,
           csrf_token: 'csrf-secret-999',
+          user: {
+            email: 'cgikchik07@gmail.com',
+            name: 'Owner',
+            picture: '',
+          },
         });
       }
       if (force401) {
@@ -294,8 +318,13 @@ test('logout button posts with X-CSRF-Token and clears workspace', async () => {
         return jsonResponse(200, {
           authenticated: true,
           auth_required: true,
-          email: 'ppksaruenee@gmail.com',
+          oauth_configured: true,
           csrf_token: 'csrf-logout-123',
+          user: {
+            email: 'ppksaruenee@gmail.com',
+            name: 'Teacher',
+            picture: '',
+          },
         });
       }
       if (url === '/api/system') return jsonResponse(200, { database: {} });
@@ -307,6 +336,8 @@ test('logout button posts with X-CSRF-Token and clears workspace', async () => {
 
   await flushMicrotasks();
   assert.equal(body.dataset.authState, 'authenticated');
+  assert.equal(getEl('auth-user-pill').hidden, false);
+  assert.equal(getEl('auth-user-email').textContent, 'ppksaruenee@gmail.com');
 
   await getEl('btn-logout').click();
   await flushMicrotasks();
