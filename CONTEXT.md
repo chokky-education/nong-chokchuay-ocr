@@ -2,6 +2,8 @@
 
 A local-first and LINE OA-enabled document vault, classroom expense reimbursement tracker, and kindergarten student profile assistant powered by CPU-only Thai OCR (`OpenThai 2.0`) and SQLite FTS5 search.
 
+> ดูคำอธิบายภาษาไทยและตารางอ้างอิงในโค้ดเพิ่มเติมได้ที่ [GLOSSARY.md](./GLOSSARY.md) และกติกาหลักของ Agent ที่ [AGENTS.md](./AGENTS.md)
+
 ## Language
 
 **Vault Document**:
