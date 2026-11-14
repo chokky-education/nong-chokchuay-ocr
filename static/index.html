@@ -9,7 +9,37 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Mali:wght@500;600;700&family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 </head>
-<body>
+<body data-auth-state="checking">
+
+  <!-- Google Auth Gate (Shown until /api/auth/me confirms access) -->
+  <section id="auth-gate" class="auth-gate-shell" aria-label="เข้าสู่ระบบน้องโชคช่วย" hidden>
+    <div class="auth-gate-card">
+      <div class="auth-gate-brand">
+        <img src="/static/mascot.jpg" alt="น้องโชคช่วย มาสคอตผู้ช่วยคุณครูอนุบาล" class="auth-gate-mascot">
+        <div>
+          <span class="auth-gate-pill">🔒 พื้นที่ส่วนตัวห้องเรียน</span>
+          <h2>เข้าสู่ระบบน้องโชคช่วย</h2>
+          <p class="auth-gate-subtitle">อนุญาตเฉพาะบัญชี Google ของคุณครูที่ลงทะเบียนไว้เท่านั้น (2 บัญชี)</p>
+        </div>
+      </div>
+
+      <div id="auth-error-banner" class="auth-error-banner" role="alert" hidden></div>
+
+      <div id="auth-webview-warning" class="auth-webview-warning" hidden>
+        <div class="auth-webview-title">⚠️ กำลังเปิดผ่านแอป LINE หรือเบราว์เซอร์ภายในแอป</div>
+        <p>Google อาจไม่อนุญาตให้ล็อกอินในหน้าต่างนี้ครับ กรุณากดเปิดลิงก์นี้ใน <strong>Safari / Chrome</strong> เพื่อเข้าสู่ระบบอย่างปลอดภัย</p>
+        <button type="button" id="btn-copy-login-url" class="btn btn-secondary btn-sm">📋 คัดลอกลิงก์ไปเปิดใน Safari / Chrome</button>
+      </div>
+
+      <div class="auth-gate-actions">
+        <a id="btn-google-login" class="btn btn-primary auth-google-btn" href="/api/auth/google/login">
+          <span>🔐 เข้าสู่ระบบด้วย Google</span>
+        </a>
+      </div>
+
+      <p class="auth-gate-note">ไฟล์ภาพ สูติบัตร และ PDF ทั้งหมดประมวลผลบนระบบส่วนตัวของคุณครู</p>
+    </div>
+  </section>
 
   <!-- Header -->
   <header>
@@ -43,6 +73,10 @@
         <span>📥 รับไฟล์จากแฟ้ม</span>
         <span id="inbox-count-badge" class="badge">0</span>
       </button>
+      <div id="auth-user-pill" class="auth-user-pill" hidden>
+        <span id="auth-user-email" class="auth-user-email"></span>
+        <button type="button" id="btn-logout" class="btn btn-secondary btn-sm">ออกจากระบบ</button>
+      </div>
     </div>
   </header>
 

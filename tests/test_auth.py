@@ -907,5 +907,54 @@ class LineWebhookAuthAndExternalBrowserTests(unittest.TestCase):
             self.assertIn("openExternalBrowser=1", uri_buttons[0]["action"]["uri"])
 
 
+class FrontendAuthUiTests(unittest.TestCase):
+    def test_index_html_and_static_assets_include_login_gate_and_zero_secrets(self) -> None:
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        static_dir = os.path.join(root_dir, "static")
+
+        with make_temp_data_dir() as tmpdir:
+            cfg = AppConfig.from_dir(
+                tmpdir,
+                inbox_poll_seconds=0,
+                app_env="production",
+                auth_required=True,
+                allowed_emails=("cgikchik07@gmail.com", "ppksaruenee@gmail.com"),
+                google_client_id="google-client-id-123",
+                google_client_secret="google-client-secret-456",
+                auth_session_secret="super-secret-session-signing-key-32bytes!",
+                public_base_url="https://nong-chokchuay-ocr.entrace-space.workers.dev",
+            )
+            test_app = create_app(config=cfg, engine_factory=lambda: FakeLineOCR(), static_dir=static_dir)
+            with TestClient(test_app) as client:
+                res = client.get("/")
+                self.assertEqual(res.status_code, 200)
+                html = res.text
+                for marker in (
+                    'data-auth-state="checking"',
+                    'id="auth-gate"',
+                    'id="btn-google-login"',
+                    'id="auth-webview-warning"',
+                    'id="btn-copy-login-url"',
+                    'id="auth-error-banner"',
+                    'id="auth-user-pill"',
+                    'id="auth-user-email"',
+                    'id="btn-logout"',
+                ):
+                    self.assertIn(marker, html)
+
+                app_js = client.get("/static/app.js")
+                self.assertEqual(app_js.status_code, 200)
+                self.assertIn("/api/auth/me", app_js.text)
+                self.assertIn("/api/auth/logout", app_js.text)
+                self.assertIn("X-CSRF-Token", app_js.text)
+
+        for fname in ("index.html", "app.js", "styles.css"):
+            fpath = os.path.join(static_dir, fname)
+            with open(fpath, "r", encoding="utf-8") as fh:
+                content = fh.read()
+            for forbidden in ("GOOGLE_CLIENT_SECRET", "AUTH_SESSION_SECRET", "LINE_CHANNEL_SECRET", "GOCSPX-"):
+                self.assertNotIn(forbidden, content)
+
+
 if __name__ == "__main__":
     unittest.main()
