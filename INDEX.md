@@ -30,12 +30,13 @@
 
 | ไฟล์ | หน้าที่หลัก | จุดเชื่อมต่อสำคัญ |
 | :--- | :--- | :--- |
-| `app.py` | FastAPI Web Server และ REST API ทั้งหมด (OCR, Vault, Review Queue, Expenses, Students, Watcher, LINE Webhook/Simulator) | เรียกใช้ `VaultService`, `VaultDatabase`, `InboxWatcher`, `LineService` |
-| `config.py` | โหลดค่าตั้งต้นจาก `.env` และ Environment Variables สร้างเป็น `AppConfig` | กำหนดพาธ `data/`, ตั้งค่า LLM (`gemini-2.5-flash`), ค่าลับ LINE OA และ `TEACHER_NAME` |
-| `database.py` | จัดการ SQLite (`data/documents.db`), FTS5 trigram index, CRUD และการทำ migration อัตโนมัติแบบรันซ้ำได้ (`PRAGMA table_info`) | ตาราง `documents`, `documents_fts`, `expenses`, `students` และฟังก์ชันส่งออก CSV (UTF-8 BOM) |
+| `app.py` | FastAPI Web Server และ REST API ทั้งหมด (Auth Middleware, Google OAuth, OCR, Vault, Review Queue, Expenses, Students, Watcher, LINE Webhook/Simulator) | เรียกใช้ `auth_service`, `VaultService`, `VaultDatabase`, `InboxWatcher`, `LineService` |
+| `auth_service.py` | ระบบยืนยันตัวตน Google OAuth 2.0, ตรวจสิทธิ์ 2 อีเมล, Cookie session (HMAC-SHA256 + SQLite `auth_sessions`), และตรวจ Origin/CSRF | เชื่อม `app.py`, `database.py`, และ `config.py` |
+| `config.py` | โหลดค่าตั้งต้นจาก `.env` และ Environment Variables สร้างเป็น `AppConfig` (แบบ fail-closed สำหรับค่า Auth) | กำหนดพาธ `data/`, `AUTH_REQUIRED`, `ALLOWED_EMAILS`, Google OAuth, `ALLOWED_LINE_USER_IDS`, LLM และ `TEACHER_NAME` |
+| `database.py` | จัดการ SQLite (`data/documents.db`), FTS5 trigram index, CRUD และการทำ migration อัตโนมัติแบบรันซ้ำได้ (`PRAGMA table_info`) | ตาราง `documents`, `documents_fts`, `expenses`, `students`, `auth_sessions` และฟังก์ชันส่งออก CSV (UTF-8 BOM) |
 | `ocr_service.py` | ท่อประมวลผลกลาง (`VaultService`) สำหรับทุกช่องทางนำเข้า จัดการไฟล์ต้นฉบับ เรียก OCR และเชื่อมตัวสกัดข้อมูล | เชื่อม `LineOCR`, `VaultDatabase`, และ `extractor.py` |
 | `extractor.py` | สกัดข้อมูลใบเสร็จ/บิลเบิกจ่าย หมวดหมู่เอกสาร ป้ายกำกับอัตโนมัติ และข้อมูลทะเบียนเด็กอนุบาล | รองรับทั้งโหมด Offline Thai Regex (`regex`) และ Text-only LLM (`llm` ผ่าน Gemini หรือ OpenAI-compatible API) |
-| `line_service.py` | จัดการ LINE Messaging API Webhook, ตรวจ `X-Line-Signature`, สร้าง Flex Card ตอบกลับฟรีด้วย `replyToken`, รับ Postback และจำลองแชทบนเว็บ | เชื่อม `/api/line/webhook` และ `/api/line/simulate` เข้ากับ `VaultService` |
+| `line_service.py` | จัดการ LINE Messaging API Webhook, ตรวจ `X-Line-Signature`, ตรวจสิทธิ์ `ALLOWED_LINE_USER_IDS`/DM-only, แนบ `openExternalBrowser=1`, สร้าง Flex Card และจำลองแชท | เชื่อม `/api/line/webhook` และ `/api/line/simulate` เข้ากับ `VaultService` |
 | `watcher.py` | ตรวจจับไฟล์ใหม่ใน `data/inbox/` (รวมถึงโฟลเดอร์ย่อย `teacher/` และ `me/`) เพื่อนำเข้าคลังอัตโนมัติ และแยกไฟล์เสียเข้า `data/inbox_failed/` | รันเป็น Background thread ใน `app.py` หรือสั่งสแกนทันทีผ่าน `/api/watcher/scan-now` |
 
 ---
@@ -57,9 +58,9 @@
 
 | ไฟล์ | หน้าที่หลัก |
 | :--- | :--- |
-| `static/index.html` | โครงสร้างหน้าเว็บหลักของ "น้องโชคช่วย" (อัปโหลดเอกสาร, ถาดรอตรวจ, สมุดเบิกจ่าย, แฟ้มเด็กอนุบาล, และ LINE Simulator) |
+| `static/index.html` | โครงสร้างหน้าเว็บหลักของ "น้องโชคช่วย" (Login Gate, แถบผู้ใช้/ออกจากระบบ, อัปโหลดเอกสาร, ถาดรอตรวจ, สมุดเบิกจ่าย, แฟ้มเด็กอนุบาล, และ LINE Simulator) |
 | `static/styles.css` | สไตล์หน้าเว็บโทน Sunny Sky & Golden Hour รองรับทั้งหน้าจอคอมพิวเตอร์และมือถือ/LIFF |
-| `static/app.js` | ตรรกะฝั่งเบราว์เซอร์ (Vanilla JS): อัปโหลดไฟล์, วาดกรอบ Bounding Box, แก้ไขข้อความ/บิล/ข้อมูลเด็ก, กรองป้ายกำกับ และจำลองแชท LINE |
+| `static/app.js` | ตรรกะฝั่งเบราว์เซอร์ (Vanilla JS): ตรวจ `/api/auth/me` ก่อนโหลดข้อมูล, แนบ `X-CSRF-Token`, เตือน LINE WebView, อัปโหลดไฟล์, วาดกรอบ Bounding Box, แก้ไขข้อมูล และจำลองแชท |
 | `static/mascot.jpg` | ภาพมาสคอตประจำระบบ "น้องโชคช่วย" |
 
 ---
@@ -71,9 +72,9 @@
 | `start.sh` | สคริปต์รันเซิร์ฟเวอร์ในเครื่องที่ `http://127.0.0.1:8765` |
 | `requirements.txt` | รายการแพ็กเกจ Python ที่ต้องใช้ (FastAPI, Uvicorn, ONNX Runtime, OpenCV, PyMuPDF ฯลฯ) |
 | `Dockerfile` | สร้างอิมเมจ Python 3.11-slim พร้อมไลบรารีระบบและโมเดล ONNX สำหรับรันบนพอร์ต `8765` |
-| `worker.js` | Cloudflare Worker + Durable Object (`NongChokChuayOCR`) ทำหน้าที่ส่งต่อคำขอเข้า Container และตั้งเวลาปิดเมื่อว่างครบ 3 นาที (`SLEEP_AFTER_MS`) |
+| `worker.js` | Cloudflare Worker + Durable Object (`NongChokChuayOCR` แบบ `singleton`) บังคับ Auth/HTTPS header และคำนวณ `configFingerprint` รีสตาร์ต Container เมื่อ secret เปลี่ยน |
 | `wrangler.toml` | ค่าตั้งต้นสำหรับ Deploy ขึ้น Cloudflare Workers Paid ($5/เดือน) + Cloudflare Containers |
-| `.github/workflows/deploy-cloudflare.yml` | GitHub Actions CI/CD สำหรับรันชุดทดสอบ Python และสั่ง `npx wrangler deploy` เมื่อมี `CLOUDFLARE_API_TOKEN` |
+| `.github/workflows/deploy-cloudflare.yml` | GitHub Actions CI/CD สำหรับรันชุดทดสอบ Python + Node (`worker.js`, `static/app.js`) และสั่ง `npx wrangler deploy` เมื่อมี `CLOUDFLARE_API_TOKEN` |
 
 ---
 
@@ -105,5 +106,8 @@
 | `tests/test_extractor.py` | ทดสอบการสกัดข้อมูลใบเสร็จและหมวดหมู่ด้วย Offline Thai Regex |
 | `tests/test_llm_hybrid.py` | ทดสอบ Text-only LLM adapter และการ fallback กลับมาใช้ Regex เมื่อ LLM ไม่พร้อม |
 | `tests/test_nong_chokchuay.py` | ทดสอบฟีเจอร์คุณครูอนุบาลครบวงจร (การเบิกจ่าย, ทะเบียนเด็กอนุบาล, ถาดรอตรวจ, LINE Webhook/Simulator) |
+| `tests/test_auth.py` | ทดสอบการยืนยันตัวตน Google OAuth, `auth_sessions`, CSRF/Origin, LINE sender allowlist และสัญญา UI |
+| `tests/test_frontend_auth.mjs` | ทดสอบการทำงานจริงของ `static/app.js` ใน Node VM (login gate, `X-CSRF-Token`, และการล้างข้อมูลเมื่อ session หมดอายุ/401) |
+| `tests/test_worker_js.mjs` | ทดสอบ `worker.js` (บังคับ `AUTH_REQUIRED="true"`, single DO `singleton`, `X-Forwarded-*` และ `configFingerprint`) |
 | `samples/` | ภาพเอกสารตัวอย่างสำหรับกดทดลองใช้งานทันที |
 | `data/` | โฟลเดอร์เก็บข้อมูลจริงในเครื่อง (`documents.db`, `uploads/`, `inbox/`, `inbox_failed/`) — **ชุดทดสอบห้ามเขียนทับโฟลเดอร์นี้** |

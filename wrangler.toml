@@ -22,6 +22,10 @@ tag = "v1"
 new_sqlite_classes = ["NongChokChuayOCR"]
 
 [vars]
+APP_ENV = "production"
+AUTH_REQUIRED = "true"
+ALLOWED_EMAILS = "cgikchik07@gmail.com,ppksaruenee@gmail.com"
+LINE_ALLOW_GROUP_CHATS = "false"
 AUTO_EXTRACT_ON_INGEST = "true"
 PUBLIC_BASE_URL = "https://nong-chokchuay-ocr.entrace-space.workers.dev"
 LLM_PROVIDER = "gemini"
@@ -29,6 +33,10 @@ LLM_MODEL = "gemini-2.5-flash"
 TEACHER_NAME = "ครูพิ้งกี้"
 
 # Secrets to configure via Wrangler CLI before deploying:
+#   npx wrangler secret put GOOGLE_CLIENT_ID
+#   npx wrangler secret put GOOGLE_CLIENT_SECRET
+#   npx wrangler secret put AUTH_SESSION_SECRET
+#   npx wrangler secret put ALLOWED_LINE_USER_IDS
 #   npx wrangler secret put LINE_CHANNEL_SECRET
 #   npx wrangler secret put LINE_CHANNEL_ACCESS_TOKEN
 #   npx wrangler secret put LLM_API_KEY

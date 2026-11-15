@@ -43,6 +43,30 @@
     personal: '👤 จ่ายส่วนตัว',
   };
 
+  const STATE_CHANGING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+  const UNAUTHORIZED_EMAIL_MSG =
+    'บัญชี Google นี้ไม่ได้รับอนุญาตให้ใช้งานระบบ กรุณาใช้อีเมลที่ลงทะเบียนไว้เท่านั้น';
+  const NOT_CONFIGURED_MSG = 'ระบบยังไม่ได้ตั้งค่า Google OAuth กรุณาติดต่อผู้ดูแลระบบ';
+
+  const AUTH_ERROR_MESSAGES = {
+    access_denied: 'ยกเลิกการเข้าสู่ระบบด้วย Google หรือไม่ได้รับอนุญาต',
+    unauthorized_email: UNAUTHORIZED_EMAIL_MSG,
+    email_not_allowed: UNAUTHORIZED_EMAIL_MSG,
+    email_unverified: 'อีเมล Google นี้ยังไม่ได้รับการยืนยัน กรุณายืนยันอีเมลก่อนเข้าใช้งาน',
+    invalid_state: 'คำขอเข้าสู่ระบบหมดอายุหรือยืนยันความปลอดภัยไม่สำเร็จ กรุณากดเข้าสู่ระบบใหม่อีกครั้ง',
+    not_configured: NOT_CONFIGURED_MSG,
+    oauth_not_configured: NOT_CONFIGURED_MSG,
+    oauth_failed: 'เชื่อมต่อ Google Sign-In ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง',
+  };
+
+  const authState = {
+    required: true,
+    authenticated: false,
+    email: '',
+    csrfToken: '',
+  };
+
   const state = {
     currentDocId: null,
     currentDocData: null,
@@ -57,6 +81,16 @@
   const $ = (id) => document.getElementById(id);
 
   const els = {
+    // Auth Gate & Header User Pill
+    authGate: $('auth-gate'),
+    authErrorBanner: $('auth-error-banner'),
+    authWebviewWarning: $('auth-webview-warning'),
+    btnCopyLoginUrl: $('btn-copy-login-url'),
+    btnGoogleLogin: $('btn-google-login'),
+    authUserPill: $('auth-user-pill'),
+    authUserEmail: $('auth-user-email'),
+    btnLogout: $('btn-logout'),
+
     // Header & Hero
     btnOpenLineSim: $('btn-open-line-sim'),
     btnOpenExpenses: $('btn-open-expenses'),
@@ -223,7 +257,7 @@
   }
 
   let toastTimer = null;
-  function showToast(message, icon = '✅') {
+  function showToast(message, icon = '✅', durationMs = 3200) {
     if (!els.toast) return;
     els.toastIcon.textContent = icon;
     els.toastMessage.textContent = message;
@@ -231,7 +265,7 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => {
       els.toast.classList.remove('show');
-    }, 3200);
+    }, durationMs);
   }
 
   function showLoading(show, text = 'น้องโชคกำลังช่วยอ่านเอกสารให้นะครับ...') {
@@ -248,8 +282,203 @@
     if (modalEl) modalEl.style.display = 'none';
   }
 
+  function isInAppWebView(ua) {
+    return /\b(Line|FBAN|FBAV|Instagram|MicroMessenger|wv)\b/i.test(String(ua || ''));
+  }
+
+  function showAuthErrorBanner(message) {
+    if (!els.authErrorBanner) return;
+    const text = String(message || '').trim();
+    els.authErrorBanner.textContent = text;
+    els.authErrorBanner.hidden = !text;
+  }
+
+  function consumeAuthErrorFromUrl() {
+    const urlParams = new URLSearchParams(window.location.search || '');
+    const errCode = (urlParams.get('auth_error') || '').trim();
+    if (!errCode) return;
+
+    showAuthErrorBanner(
+      AUTH_ERROR_MESSAGES[errCode] || 'เข้าสู่ระบบไม่สำเร็จ กรุณาลองใหม่อีกครั้ง',
+    );
+    try {
+      const cleanUrl = new URL(window.location.href);
+      cleanUrl.searchParams.delete('auth_error');
+      const nextSearch = cleanUrl.searchParams.toString();
+      const nextHref = `${cleanUrl.pathname}${nextSearch ? `?${nextSearch}` : ''}${cleanUrl.hash || ''}`;
+      window.history?.replaceState?.({}, '', nextHref);
+    } catch (_) {
+      window.history?.replaceState?.({}, '', '/');
+    }
+  }
+
+  function clearRenderedWorkspaceData() {
+    state.currentDocId = null;
+    state.currentDocData = null;
+    state.currentFile = null;
+    state.currentIsPdf = false;
+    state.currentPdfPage = 1;
+    state.currentPdfTotalPages = 1;
+    state.currentLines = [];
+    state.lineBoxes = [];
+
+    [els.dbModal, els.expenseModal, els.studentModal, els.lineSimModal].forEach(closeModal);
+
+    if (els.docImage) {
+      els.docImage.src = '';
+      els.docImage.style.display = 'none';
+    }
+    if (els.boxesLayer) els.boxesLayer.innerHTML = '';
+    if (els.viewerPlaceholder) els.viewerPlaceholder.style.display = 'flex';
+    if (els.pdfControls) els.pdfControls.style.display = 'none';
+    if (els.fileBadge) {
+      els.fileBadge.textContent = '';
+      els.fileBadge.style.display = 'none';
+    }
+    if (els.docDimensions) els.docDimensions.textContent = '';
+
+    if (els.statTime) els.statTime.textContent = '-';
+    if (els.statLines) els.statLines.textContent = '-';
+    if (els.statConf) els.statConf.textContent = '-';
+    if (els.statDbStatus) els.statDbStatus.textContent = '-';
+
+    if (els.docCategoryInput) els.docCategoryInput.value = 'general';
+    if (els.docTagsInput) els.docTagsInput.value = '';
+    if (els.docDateInput) els.docDateInput.value = '';
+    if (els.btnSaveDoc) els.btnSaveDoc.disabled = true;
+    if (els.btnExtractExpense) els.btnExtractExpense.disabled = true;
+    if (els.btnConfirmReview) els.btnConfirmReview.disabled = true;
+    if (els.btnDownloadSource) {
+      els.btnDownloadSource.href = '#';
+      els.btnDownloadSource.style.display = 'none';
+    }
+
+    if (els.studentBanner) els.studentBanner.style.display = 'none';
+    if (els.studentBannerText) els.studentBannerText.textContent = '';
+    if (els.studentAllergyBadge) els.studentAllergyBadge.textContent = '';
+    if (els.expenseBanner) els.expenseBanner.style.display = 'none';
+    if (els.expenseBannerText) els.expenseBannerText.textContent = '';
+
+    if (els.ocrTextResult) els.ocrTextResult.value = '';
+    if (els.ocrMarkdownResult) els.ocrMarkdownResult.value = '';
+    if (els.ocrJsonResult) els.ocrJsonResult.value = '';
+    if (els.linesTbody) els.linesTbody.innerHTML = '';
+    if (els.charCount) els.charCount.textContent = '0 ตัวอักษร | 0 คำ';
+    if (els.footerDocId) els.footerDocId.textContent = 'ผู้ช่วย: น้องโชคช่วย (OpenThai 2.0)';
+
+    if (els.docsList) els.docsList.innerHTML = '';
+    if (els.expensesTbody) els.expensesTbody.innerHTML = '';
+    if (els.studentsList) els.studentsList.innerHTML = '';
+    if (els.lineChatMessages) els.lineChatMessages.innerHTML = '';
+
+    if (els.dbCountBadge) els.dbCountBadge.textContent = '0';
+    if (els.inboxCountBadge) els.inboxCountBadge.textContent = '0';
+    if (els.studentCountBadge) els.studentCountBadge.textContent = '0';
+    if (els.pendingReimbBadge) els.pendingReimbBadge.textContent = '0 ฿';
+    if (els.kpiPendingReviewVal) els.kpiPendingReviewVal.textContent = '0 ฉบับ';
+    if (els.kpiPendingReimbVal) els.kpiPendingReimbVal.textContent = '0.00 ฿';
+    if (els.kpiStudentsVal) els.kpiStudentsVal.textContent = '0 คน';
+    if (els.kpiAllergyNote) els.kpiAllergyNote.textContent = 'ยังไม่มีข้อมูลแพ้อาหาร';
+    if (els.kpiVaultVal) els.kpiVaultVal.textContent = '0 ฉบับ';
+    if (els.nongChokSpeech) els.nongChokSpeech.textContent = '';
+  }
+
+  function showUnauthenticatedGate(errorMessage = '') {
+    authState.authenticated = false;
+    authState.email = '';
+    authState.csrfToken = '';
+    clearRenderedWorkspaceData();
+
+    if (els.authUserEmail) els.authUserEmail.textContent = '';
+    if (els.authUserPill) els.authUserPill.hidden = true;
+    if (els.authGate) els.authGate.hidden = false;
+    if (document.body?.dataset) document.body.dataset.authState = 'unauthenticated';
+    if (errorMessage) showAuthErrorBanner(errorMessage);
+  }
+
+  function showAuthenticatedWorkspace({ required, authenticated, email, csrfToken }) {
+    authState.required = Boolean(required);
+    authState.authenticated = Boolean(authenticated);
+    authState.email = email || '';
+    authState.csrfToken = csrfToken || '';
+
+    if (els.authGate) els.authGate.hidden = true;
+    if (document.body?.dataset) document.body.dataset.authState = 'authenticated';
+
+    const showUserPill = Boolean(authState.authenticated && authState.email);
+    if (els.authUserEmail) els.authUserEmail.textContent = showUserPill ? authState.email : '';
+    if (els.authUserPill) els.authUserPill.hidden = !showUserPill;
+  }
+
+  async function checkAuthStatus() {
+    try {
+      const me = await apiFetch('/api/auth/me', { method: 'GET' });
+      const isRequired = me.auth_required !== false;
+      const isAuthed = Boolean(me.authenticated);
+      if (!isRequired || isAuthed) {
+        showAuthenticatedWorkspace({
+          required: isRequired,
+          authenticated: isAuthed,
+          email: me.user?.email || me.email || '',
+          csrfToken: me.csrf_token || '',
+        });
+        return true;
+      }
+      showUnauthenticatedGate();
+      return false;
+    } catch (_) {
+      showUnauthenticatedGate('ไม่สามารถตรวจสอบสิทธิ์การเข้าใช้งานได้ กรุณาลองใหม่อีกครั้ง');
+      return false;
+    }
+  }
+
+  async function handleLogout() {
+    if (els.btnLogout) els.btnLogout.disabled = true;
+    try {
+      await apiFetch('/api/auth/logout', { method: 'POST' });
+      showUnauthenticatedGate();
+      showAuthErrorBanner('');
+    } catch (err) {
+      if (err && err.status === 401) {
+        // apiFetch already cleared workspace data and displayed the expired-session notice.
+        return;
+      }
+      // Keep the authenticated UI active when revocation cannot be confirmed so the user can retry.
+      showToast('ยังออกจากระบบไม่สำเร็จ กรุณาลองใหม่อีกครั้ง', '❌', 6000);
+    } finally {
+      if (els.btnLogout) els.btnLogout.disabled = false;
+    }
+  }
+
   async function apiFetch(url, options = {}) {
-    const res = await fetch(url, options);
+    const method = String(options.method || 'GET').toUpperCase();
+    const headers = {};
+    if (options.headers) {
+      if (typeof options.headers.forEach === 'function') {
+        options.headers.forEach((v, k) => {
+          headers[k] = v;
+        });
+      } else {
+        Object.assign(headers, options.headers);
+      }
+    }
+    if (STATE_CHANGING_METHODS.has(method) && authState.csrfToken) {
+      headers['X-CSRF-Token'] = authState.csrfToken;
+    }
+
+    const res = await fetch(url, {
+      credentials: 'same-origin',
+      ...options,
+      method,
+      headers,
+    });
+    if (res.status === 401 && url !== '/api/auth/me') {
+      showUnauthenticatedGate('เซสชันหมดอายุแล้ว กรุณาเข้าสู่ระบบด้วย Google ใหม่อีกครั้ง');
+      const err = new Error('กรุณาเข้าสู่ระบบใหม่อีกครั้ง');
+      err.status = 401;
+      throw err;
+    }
+
     const contentType = res.headers.get('content-type') || '';
     let data = null;
     if (contentType.includes('application/json')) {
@@ -259,9 +488,21 @@
       data = { detail: txt };
     }
     if (!res.ok) {
-      throw new Error(data.detail || data.error || `HTTP ${res.status}`);
+      const err = new Error(data.detail || data.error || `HTTP ${res.status}`);
+      err.status = res.status;
+      throw err;
     }
     return data;
+  }
+
+  async function fetchBlobAuthed(url) {
+    const res = await fetch(url, { credentials: 'same-origin' });
+    if (res.status === 401) {
+      showUnauthenticatedGate('เซสชันหมดอายุแล้ว กรุณาเข้าสู่ระบบด้วย Google ใหม่อีกครั้ง');
+      throw new Error('กรุณาเข้าสู่ระบบใหม่อีกครั้ง');
+    }
+    if (!res.ok) throw new Error('ไม่พบไฟล์ตัวอย่าง');
+    return res.blob();
   }
 
   function parseTagsList(rawTags) {
@@ -652,9 +893,7 @@
   async function runLegacySample(filename) {
     showLoading(true, 'น้องโชคกำลังหยิบเอกสารตัวอย่างมาอ่านให้ครับ...');
     try {
-      const res = await fetch(`/api/sample/${encodeURIComponent(filename)}`);
-      if (!res.ok) throw new Error('ไม่พบไฟล์ตัวอย่าง');
-      const blob = await res.blob();
+      const blob = await fetchBlobAuthed(`/api/sample/${encodeURIComponent(filename)}`);
       const file = new File([blob], filename, { type: blob.type || 'image/png' });
       await uploadAndProcessFile(file, 1, false);
     } catch (err) {
@@ -1287,9 +1526,7 @@
     const fname = PRESET_TO_FILE[preset];
     if (!fname) return;
     try {
-      const res = await fetch(`/api/sample/${encodeURIComponent(fname)}`);
-      if (!res.ok) throw new Error('ไม่พบไฟล์ตัวอย่าง');
-      const blob = await res.blob();
+      const blob = await fetchBlobAuthed(`/api/sample/${encodeURIComponent(fname)}`);
       const file = new File([blob], fname, { type: blob.type || 'image/png' });
       await sendLineSimFile(file, PRESET_LABELS[preset] || fname);
     } catch (err) {
@@ -1298,6 +1535,17 @@
   }
 
   function bindEvents() {
+    // Auth Gate & Header Logout
+    els.btnLogout?.addEventListener('click', handleLogout);
+    els.btnCopyLoginUrl?.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard?.writeText?.(window.location.href);
+        showToast('คัดลอกลิงก์แล้วครับ นำไปเปิดใน Safari หรือ Chrome ได้เลย');
+      } catch (_) {
+        showToast('กรุณาคัดลอก URL จากแถบด้านบนไปเปิดใน Safari / Chrome ครับ', '⚠️');
+      }
+    });
+
     // Tabs & Tech Mode
     document.querySelectorAll('.tab-btn').forEach((btn) => {
       btn.addEventListener('click', () => activateTab(btn.dataset.tab));
@@ -1574,11 +1822,19 @@
   }
 
   async function init() {
+    consumeAuthErrorFromUrl();
+    if (els.authWebviewWarning) {
+      els.authWebviewWarning.hidden = !isInAppWebView(window.navigator?.userAgent || '');
+    }
     bindEvents();
+
+    const canEnterWorkspace = await checkAuthStatus();
+    if (!canEnterWorkspace) return;
+
     syncTechMode();
     await loadSystemStats();
 
-    const urlParams = new URLSearchParams(window.location.search);
+    const urlParams = new URLSearchParams(window.location.search || '');
     const deepDocId = urlParams.get('doc');
     if (deepDocId) {
       await openDocumentById(deepDocId);

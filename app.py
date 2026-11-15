@@ -2,6 +2,7 @@ import csv
 import io
 import json
 import os
+import posixpath
 import re
 import sys
 from contextlib import asynccontextmanager
@@ -10,7 +11,7 @@ from urllib.parse import quote
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -19,6 +20,7 @@ MODEL_DIR = os.path.join(BASE_DIR, "model")
 sys.path.insert(0, BASE_DIR)
 sys.path.insert(0, MODEL_DIR)
 
+import auth_service
 import database
 import extractor
 import line_service
@@ -83,6 +85,7 @@ def _default_engine_factory() -> LineOCR:
 def create_app(
     config: Optional[AppConfig] = None,
     engine_factory: Optional[Callable[[], Any]] = None,
+    static_dir: Optional[str] = None,
 ) -> FastAPI:
     cfg = config or AppConfig.from_env()
     factory = engine_factory or _default_engine_factory
@@ -112,13 +115,152 @@ def create_app(
     application.state.get_engine = get_engine
     application.state.watcher = InboxWatcher(config=cfg, engine_getter=get_engine)
 
+    _PUBLIC_PATHS = {
+        "/",
+        "/api/health",
+        "/api/auth/me",
+        "/api/auth/google/login",
+        "/api/auth/google/callback",
+        "/api/line/webhook",
+    }
+    _PUBLIC_STATIC_PATHS = {
+        "/static/styles.css",
+        "/static/app.js",
+        "/static/mascot.jpg",
+    }
+    _STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+    @application.middleware("http")
+    async def auth_and_csrf_middleware(request: Request, call_next):
+        if not cfg.auth_required or request.method == "OPTIONS":
+            return await call_next(request)
+
+        raw_path = request.url.path or "/"
+        if ".." in raw_path.split("/"):
+            return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+
+        norm_path = posixpath.normpath(raw_path)
+        if (
+            norm_path in _PUBLIC_PATHS
+            or norm_path in _PUBLIC_STATIC_PATHS
+            or norm_path.startswith("/static/mascot_cards/")
+        ):
+            return await call_next(request)
+
+        session = auth_service.authenticate_request(request, cfg)
+        if not session:
+            return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+
+        request.state.auth_user = session
+        if request.method in _STATE_CHANGING_METHODS:
+            if not auth_service.validate_csrf_and_origin(request, cfg, session):
+                return JSONResponse(status_code=403, content={"detail": "CSRF validation failed"})
+
+        return await call_next(request)
+
+    cors_origins = list(auth_service.get_cors_allowed_origins(cfg)) if cfg.auth_required else ["*"]
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @application.get("/api/health")
+    def get_health():
+        return {
+            "status": "ok",
+            "brand": "น้องโชคช่วย (Nong ChokChuay)",
+            "auth_required": cfg.auth_required,
+            "oauth_configured": auth_service.is_oauth_configured(cfg),
+            "line_oa_configured": bool(cfg.line_channel_secret and cfg.line_channel_access_token),
+            "line_allowlist_configured": bool(cfg.allowed_line_user_ids),
+        }
+
+    @application.get("/api/auth/me")
+    def get_auth_me(request: Request):
+        session = auth_service.authenticate_request(request, cfg) if cfg.auth_required else None
+        return {
+            "authenticated": bool(session) if cfg.auth_required else True,
+            "auth_required": cfg.auth_required,
+            "oauth_configured": auth_service.is_oauth_configured(cfg),
+            "csrf_token": session.get("csrf_token") if session else None,
+            "user": (
+                {
+                    "email": session["email"],
+                    "name": session.get("name", ""),
+                    "picture": session.get("picture", ""),
+                }
+                if session
+                else None
+            ),
+        }
+
+    @application.get("/api/auth/google/login")
+    def auth_google_login(request: Request):
+        if not auth_service.is_oauth_configured(cfg):
+            return RedirectResponse(url="/?auth_error=not_configured", status_code=302)
+        base_url = auth_service.resolve_external_base_url(request, cfg)
+        redirect_uri = f"{base_url}/api/auth/google/callback"
+        resp = RedirectResponse(url="/", status_code=302)
+        state = auth_service.issue_oauth_state_cookie(resp, request, cfg)
+        resp.headers["location"] = auth_service.build_google_authorize_url(redirect_uri, state, cfg)
+        return resp
+
+    @application.get("/api/auth/google/callback")
+    def auth_google_callback(
+        request: Request,
+        code: str = "",
+        state: str = "",
+        error: str = "",
+    ):
+        def _error_redirect(err_code: str) -> RedirectResponse:
+            err_resp = RedirectResponse(url=f"/?auth_error={err_code}", status_code=302)
+            auth_service.clear_oauth_state_cookie(err_resp, request, cfg)
+            return err_resp
+
+        if error:
+            return _error_redirect("oauth_failed")
+        if not auth_service.is_oauth_configured(cfg):
+            return _error_redirect("not_configured")
+        if not code or not auth_service.verify_oauth_state(request, cfg, state):
+            return _error_redirect("invalid_state")
+
+        base_url = auth_service.resolve_external_base_url(request, cfg)
+        redirect_uri = f"{base_url}/api/auth/google/callback"
+        try:
+            token_data = auth_service.exchange_google_code(code, redirect_uri, cfg)
+            access_token = str(token_data.get("access_token") or "").strip()
+            if not access_token:
+                return _error_redirect("oauth_failed")
+            userinfo = auth_service.fetch_google_userinfo(access_token)
+        except Exception as exc:
+            print(f"[Auth] Google OAuth callback failed: {exc}")
+            return _error_redirect("oauth_failed")
+
+        email_verified = userinfo.get("email_verified") is True
+        email = str(userinfo.get("email") or "").strip().lower()
+        if not email_verified or not email or email not in cfg.allowed_emails:
+            return _error_redirect("unauthorized_email")
+
+        resp = RedirectResponse(url="/", status_code=302)
+        auth_service.clear_oauth_state_cookie(resp, request, cfg)
+        auth_service.issue_login_session(
+            resp,
+            request,
+            cfg,
+            email=email,
+            name=str(userinfo.get("name") or ""),
+            picture=str(userinfo.get("picture") or ""),
+        )
+        return resp
+
+    @application.post("/api/auth/logout")
+    def auth_logout(request: Request):
+        resp = JSONResponse({"success": True})
+        auth_service.revoke_login_session(resp, request, cfg)
+        return resp
 
     @application.get("/api/system")
     def get_system_info():
@@ -563,6 +705,9 @@ def create_app(
     # LINE OA Webhook & Interactive Simulator
     @application.post("/api/line/webhook")
     async def line_webhook(request: Request):
+        if cfg.auth_required and not (cfg.line_channel_secret or "").strip():
+            raise HTTPException(status_code=503, detail="LINE channel secret is not configured")
+
         body = await request.body()
         signature = request.headers.get("X-Line-Signature", "")
         if not line_service.verify_line_signature(body, signature, cfg.line_channel_secret):
@@ -575,11 +720,28 @@ def create_app(
 
         events = payload.get("events") or []
         replies: List[Dict[str, Any]] = []
+        rejected_events = 0
 
         for event in events:
             etype = event.get("type")
             reply_token = event.get("replyToken", "")
-            user_id = (event.get("source") or {}).get("userId", "")
+            source = event.get("source") or {}
+            user_id = (source.get("userId") or "").strip()
+
+            allowed, denial_text = line_service.authorize_line_event_source(source, cfg)
+            if not allowed:
+                rejected_events += 1
+                if reply_token and cfg.line_channel_access_token and denial_text:
+                    try:
+                        line_service.reply_line_messages(
+                            reply_token,
+                            [{"type": "text", "text": denial_text}],
+                            cfg.line_channel_access_token,
+                        )
+                    except Exception as exc:
+                        print(f"[LINE] Rejection reply skipped/failed: {exc}")
+                continue
+
             reply_obj: Optional[Dict[str, Any]] = None
 
             if etype == "message":
@@ -659,7 +821,12 @@ def create_app(
                         print(f"[LINE] Reply API call skipped/failed: {exc}")
                 replies.append(reply_obj)
 
-        return {"success": True, "processed_events": len(replies), "replies": replies}
+        return {
+            "success": True,
+            "processed_events": len(replies),
+            "rejected_events": rejected_events,
+            "replies": replies,
+        }
 
     @application.post("/api/line/simulate")
     async def line_simulate(
@@ -756,7 +923,7 @@ def create_app(
             traceback.print_exc()
             return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
 
-    STATIC_DIR = os.path.join(BASE_DIR, "static")
+    STATIC_DIR = os.path.abspath(static_dir) if static_dir else os.path.join(BASE_DIR, "static")
     os.makedirs(STATIC_DIR, exist_ok=True)
     application.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
