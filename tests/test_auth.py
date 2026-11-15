@@ -580,6 +580,10 @@ def _sign_line_body(body_bytes: bytes, secret: str) -> str:
 
 
 class LineWebhookAuthAndExternalBrowserTests(unittest.TestCase):
+    def setUp(self):
+        loading = patch("line_service.start_line_loading", return_value=True)
+        loading.start()
+        self.addCleanup(loading.stop)
     def _make_line_config(self, tmpdir: str, **overrides) -> AppConfig:
         defaults = dict(
             inbox_poll_seconds=0,

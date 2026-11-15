@@ -27,6 +27,10 @@ def _sign_line_body(body_bytes: bytes, secret: str) -> str:
 
 class NongChokChuayTests(unittest.TestCase):
     def setUp(self):
+        self.start_loading_original = line_service.start_line_loading
+        loading = patch("line_service.start_line_loading", return_value=True)
+        loading.start()
+        self.addCleanup(loading.stop)
         self._tmp = make_temp_data_dir()
         self.cfg = AppConfig.from_dir(
             self._tmp.name,
@@ -40,6 +44,34 @@ class NongChokChuayTests(unittest.TestCase):
         self.test_app = app_module.create_app(config=self.cfg, engine_factory=lambda: self.fake_ocr)
         self.client_cm = TestClient(self.test_app)
         self.client = self.client_cm.__enter__()
+
+    def test_loading_api_and_webhook_fail_open(self):
+        start_line_loading = self.start_loading_original
+        with patch("line_service.requests.post") as post:
+            post.return_value.status_code = 202
+            self.assertTrue(start_line_loading("Uteacher", "token"))
+            self.assertEqual(post.call_args.kwargs["json"], {"chatId": "Uteacher", "loadingSeconds": 60})
+            self.assertEqual(post.call_args.kwargs["timeout"], (1, 1))
+            for status in (400, 401, 429, 500):
+                post.return_value.status_code = status
+                self.assertFalse(start_line_loading("Uteacher", "token"))
+            post.side_effect = line_service.requests.Timeout("secret must not be logged")
+            self.assertFalse(start_line_loading("Uteacher", "token"))
+
+        for kind in ("text", "image", "file", "postback"):
+            event = {"type": "postback" if kind == "postback" else "message", "replyToken": "rt", "source": {"type": "user", "userId": "Uteacher"}, "message": {"type": kind, "id": "m", "text": "เมนู"}, "postback": {"data": "unknown"}}
+            body = json.dumps({"events": [event]}).encode()
+            with self.subTest(kind=kind), patch("line_service.start_line_loading", return_value=False) as loading, patch("line_service.download_line_content", return_value=(make_png_bytes(), "image/png")), patch("line_service.reply_line_messages", return_value=True):
+                response = self.client.post("/api/line/webhook", content=body, headers={"X-Line-Signature": _sign_line_body(body, "chok-secret-123")})
+                self.assertEqual(response.status_code, 200)
+                loading.assert_called_once_with("Uteacher", "chok-token-abc")
+
+        for source, kind in (({"type": "group", "userId": "Uteacher"}, "text"), ({"type": "user", "userId": "Uteacher"}, "sticker"), ({"type": "user"}, "text")):
+            event = {"type": "message", "replyToken": "rt", "source": source, "message": {"type": kind, "text": "เมนู"}}
+            body = json.dumps({"events": [event]}).encode()
+            with patch("line_service.start_line_loading") as loading, patch("line_service.reply_line_messages", return_value=True):
+                self.client.post("/api/line/webhook", content=body, headers={"X-Line-Signature": _sign_line_body(body, "chok-secret-123")})
+                loading.assert_not_called()
 
     def tearDown(self):
         self.client_cm.__exit__(None, None, None)

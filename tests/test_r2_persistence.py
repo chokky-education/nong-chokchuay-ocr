@@ -191,6 +191,10 @@ def _r2_config(
 
 
 class R2PersistenceTests(unittest.TestCase):
+    def setUp(self):
+        loading = mock.patch("line_service.start_line_loading", return_value=True)
+        loading.start()
+        self.addCleanup(loading.stop)
     def test_01_restart_recovery_preserves_db_fts_preview_sessions_and_lazy_files(self):
         r2 = InMemoryR2Gateway()
         png_bytes = _make_png_bytes((220, 235, 255))
