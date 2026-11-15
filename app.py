@@ -7,7 +7,7 @@ import posixpath
 import re
 import sys
 from contextlib import asynccontextmanager
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 from urllib.parse import quote
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -15,7 +15,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "model")
@@ -27,6 +27,7 @@ import database
 import extractor
 import line_service
 import ocr_service
+import rich_menu
 import storage_service
 from config import AppConfig
 from runtime.line_engine import LineOCR
@@ -70,6 +71,24 @@ class StudentUpsertRequest(BaseModel):
     parent_phone: str = ""
     allergies: str = ""
     medical_notes: str = ""
+
+
+class StudentCreateRequest(StudentUpsertRequest):
+    classroom: str = ""
+
+
+class TeacherSettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    teacher_name: str = Field(min_length=1, max_length=60)
+    classroom: str = Field(min_length=1, max_length=40)
+    default_reimbursement_status: Literal["pending_reimbursement", "personal"]
+
+    @field_validator("teacher_name", "classroom", mode="before")
+    @classmethod
+    def clean_label(cls, value):
+        if not isinstance(value, str) or any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+            raise ValueError("กรุณาใช้ข้อความบรรทัดเดียว")
+        return value.strip()
 
 
 _KINDERGARTEN_PRESETS = {
@@ -133,6 +152,12 @@ def create_app(
     application.state.engine_factory = factory
     application.state.engine = None
     application.state.storage = storage
+
+    def current_settings():
+        return storage.execute_read(lambda: database.get_teacher_settings(cfg.db_path, teacher_name=cfg.teacher_name))
+
+    def current_teacher_name():
+        return current_settings()["teacher_name"]
 
     def get_engine() -> Any:
         if application.state.engine is None:
@@ -345,7 +370,7 @@ def create_app(
         db_stats = database.get_db_stats(db_path=cfg.db_path)
         return {
             "brand": "น้องโชคช่วย (Nong ChokChuay)",
-            "teacher_name": cfg.teacher_name,
+            "teacher_name": current_teacher_name(),
             "engine": "OpenThai 2.0 OCR Text (Local ONNX)",
             "model_architecture": "PaddlePaddle PP-OCRv6-tiny Detector + Thai CTC Recognizer",
             "parameters": "1.02M (det: 428K, rec: 587K)",
@@ -371,6 +396,30 @@ def create_app(
             },
             "python_version": sys.version.split()[0],
         }
+
+    @application.get("/api/settings")
+    def get_settings():
+        return {"settings": current_settings()}
+
+    @application.put("/api/settings")
+    def save_settings(request: Request, payload: TeacherSettingsRequest):
+        actor = (getattr(request.state, "auth_user", None) or {}).get("email", "local")
+        values = payload.model_dump()
+        return storage.execute_mutation(
+            _resolve_idempotency_key(request, scope="web_settings"), "save_settings",
+            lambda _rev: {"success": True, "settings": database.save_teacher_settings(
+                values, updated_by=actor, db_path=cfg.db_path)},
+            payload_hash=_compute_json_payload_hash(values),
+        )
+
+    @application.get("/api/line/rich-menu")
+    def get_rich_menu():
+        # Use the configured origin, never the request Host header, for provisioned links.
+        origin = cfg.public_base_url or "http://127.0.0.1:8765"
+        try:
+            return rich_menu.build_rich_menu(origin)
+        except ValueError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @application.get("/api/samples")
     def get_samples():
@@ -827,7 +876,7 @@ def create_app(
         return {"success": True, **data}
 
     @application.post("/api/students")
-    def create_student(request: Request, payload: StudentUpsertRequest):
+    def create_student(request: Request, payload: StudentCreateRequest):
         storage.require_ready()
         op_id = _resolve_idempotency_key(request, scope="web_student_create")
         p_hash = _compute_json_payload_hash(payload.model_dump())
@@ -850,7 +899,7 @@ def create_app(
                 nickname=payload.nickname,
                 citizen_id=payload.citizen_id,
                 birth_date=payload.birth_date,
-                classroom=payload.classroom,
+                classroom=payload.classroom or database.get_teacher_settings(cfg.db_path)["classroom"],
                 parent_name=payload.parent_name,
                 parent_phone=payload.parent_phone,
                 allergies=payload.allergies,
@@ -997,6 +1046,7 @@ def create_app(
                         print(f"[LINE] Rejection reply skipped/failed: {exc}")
                 continue
 
+            teacher_name = current_teacher_name()
             reply_obj: Optional[Dict[str, Any]] = None
             event_uid = str(event.get("webhookEventId") or "").strip()
 
@@ -1015,13 +1065,13 @@ def create_app(
                             db_path=cfg.db_path,
                             public_base_url=cfg.public_base_url,
                             config=cfg,
-                            teacher_name=cfg.teacher_name,
+                            teacher_name=teacher_name,
                             storage=storage,
                         )
                     except storage_service.StorageError as exc:
                         storage_failed = True
                         reply_text = (
-                            f"ขออภัยครับ{cfg.teacher_name} ระบบจัดเก็บข้อมูลขัดข้องชั่วคราว "
+                            f"ขออภัยครับคุณครู ระบบจัดเก็บข้อมูลขัดข้องชั่วคราว "
                             "จึงยังไม่สามารถดึงข้อมูลในตอนนี้ได้ครับ กรุณาลองใหม่อีกครั้งนะครับ"
                         )
                         reply_obj = {
@@ -1061,12 +1111,12 @@ def create_app(
                                 student=ocr_res.get("student"),
                                 public_base_url=cfg.public_base_url,
                                 config=cfg,
-                                teacher_name=cfg.teacher_name,
+                                teacher_name=teacher_name,
                             )
                         except storage_service.StorageError as exc:
                             storage_failed = True
                             reply_text = (
-                                f"ขออภัยครับ{cfg.teacher_name} ระบบจัดเก็บข้อมูลขัดข้องชั่วคราว "
+                                f"ขออภัยครับคุณครู ระบบจัดเก็บข้อมูลขัดข้องชั่วคราว "
                                 "จึงยังไม่ได้บันทึกเอกสารนี้ครับ กรุณาส่งใหม่อีกครั้งนะครับ"
                             )
                             reply_obj = {
@@ -1076,14 +1126,14 @@ def create_app(
                                 "line_messages": [{"type": "text", "text": reply_text}],
                             }
                         except Exception as exc:
-                            reply_text = f"น้องโชคเปิดไฟล์นี้ไม่ได้ครับ{cfg.teacher_name} ({exc})"
+                            reply_text = f"น้องโชคเปิดไฟล์นี้ไม่ได้ครับคุณครู ({exc})"
                             reply_obj = {
                                 "reply_text": reply_text,
                                 "line_messages": [{"type": "text", "text": reply_text}],
                             }
                     else:
                         reply_text = (
-                            f"น้องโชคได้รับข้อความไฟล์แล้วครับ{cfg.teacher_name} "
+                            f"น้องโชคได้รับข้อความไฟล์แล้วครับคุณครู "
                             "แต่ยังไม่ได้ตั้งค่า LINE_CHANNEL_ACCESS_TOKEN ครับ"
                         )
                         reply_obj = {
@@ -1104,7 +1154,7 @@ def create_app(
                         pb_data,
                         db_path=cfg.db_path,
                         config=cfg,
-                        teacher_name=cfg.teacher_name,
+                        teacher_name=teacher_name,
                         public_base_url=cfg.public_base_url,
                         storage=storage,
                         operation_id=pb_op_id,
@@ -1112,7 +1162,7 @@ def create_app(
                 except storage_service.StorageError as exc:
                     storage_failed = True
                     reply_text = (
-                        f"ขออภัยครับ{cfg.teacher_name} ระบบจัดเก็บข้อมูลขัดข้องชั่วคราว "
+                        f"ขออภัยครับคุณครู ระบบจัดเก็บข้อมูลขัดข้องชั่วคราว "
                         "จึงยังไม่ได้บันทึกการเปลี่ยนแปลงครับ กรุณากดลองใหม่อีกครั้งนะครับ"
                     )
                     reply_obj = {
@@ -1163,13 +1213,14 @@ def create_app(
         operation_id: str = Form(""),
     ):
         storage.require_ready()
+        teacher_name = current_teacher_name()
         op_id = _resolve_idempotency_key(request, operation_id, scope="web_line_sim")
         if postback_data.strip():
             res = line_service.handle_line_postback(
                 postback_data.strip(),
                 db_path=cfg.db_path,
                 config=cfg,
-                teacher_name=cfg.teacher_name,
+                teacher_name=teacher_name,
                 public_base_url=cfg.public_base_url,
                 storage=storage,
                 operation_id=op_id,
@@ -1199,7 +1250,7 @@ def create_app(
                 student=ocr_res.get("student"),
                 public_base_url=cfg.public_base_url,
                 config=cfg,
-                teacher_name=cfg.teacher_name,
+                teacher_name=teacher_name,
             )
             return JSONResponse({
                 "success": True,
@@ -1213,7 +1264,7 @@ def create_app(
             db_path=cfg.db_path,
             public_base_url=cfg.public_base_url,
             config=cfg,
-            teacher_name=cfg.teacher_name,
+            teacher_name=teacher_name,
             storage=storage,
         )
         return JSONResponse({"success": True, "mode": "text", **res})

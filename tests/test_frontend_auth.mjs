@@ -35,6 +35,10 @@ function createMockElement(id = '') {
     type: '',
     className: '',
     dataset: {},
+    attributes: {},
+    setAttribute(name, value) { this.attributes[name] = String(value); },
+    removeAttribute(name) { delete this.attributes[name]; },
+    focus() { this.focused = true; },
     style: {},
     files: [],
     children: [],
@@ -104,7 +108,7 @@ function flushMicrotasks() {
   return new Promise((resolve) => setTimeout(resolve, 20));
 }
 
-function runFrontendApp({ search = '', userAgent = 'Mozilla/5.0 Chrome/120.0', fetchImpl }) {
+function runFrontendApp({ search = '', userAgent = 'Mozilla/5.0 Chrome/120.0', fetchImpl, sessionStorageData = new Map() }) {
   const elements = new Map();
   const getEl = (id) => {
     if (!elements.has(id)) {
@@ -134,6 +138,11 @@ function runFrontendApp({ search = '', userAgent = 'Mozilla/5.0 Chrome/120.0', f
   const winListeners = new Map();
   let currentHref = `https://nongchok.example.com/${search}`;
   const windowMock = {
+    sessionStorage: {
+      setItem(key, value) { sessionStorageData.set(key, value); },
+      getItem(key) { return sessionStorageData.get(key) ?? null; },
+      removeItem(key) { sessionStorageData.delete(key); },
+    },
     location: {
       search,
       get href() {
@@ -143,7 +152,7 @@ function runFrontendApp({ search = '', userAgent = 'Mozilla/5.0 Chrome/120.0', f
     history: {
       replaceState(_state, _title, nextUrl) {
         replaceStateCalls.push(nextUrl);
-        currentHref = nextUrl;
+        currentHref = new URL(nextUrl, currentHref).href;
       },
     },
     navigator: {
@@ -636,4 +645,111 @@ test('LINE simulator renders Mascot Card + Quick Replies safely via DOM and clea
   // Re-opening simulator restores welcome bubble cleanly
   await getEl('btn-open-line-sim').click();
   assert.equal(getEl('line-chat-messages').children.length, 1);
+});
+
+const teacherSettings = { teacher_name: 'ครูทดสอบ', classroom: 'อนุบาล 3/2', default_reimbursement_status: 'personal' };
+const menuFixture = {
+  image_path: '/static/rich_menu/menu.jpg', menu: { size: { width: 1526, height: 1031 } },
+  items: ['upload', 'summary', 'expenses', 'students', 'review', 'search', 'settings', 'help'].map((key, idx) => ({
+    key, label: key, bounds: { x: idx * 100, y: 0, width: 100, height: 100 },
+    action: ['expenses', 'students', 'settings'].includes(key)
+      ? { type: 'uri', uri: `https://nongchok.example.com/?view=${key}&openExternalBrowser=1` }
+      : { type: 'postback', data: `action=run_cmd&cmd=${key}` },
+  })),
+};
+function richMenuFetch(url) {
+  if (url === '/api/auth/me') return jsonResponse(200, { authenticated: true, auth_required: true, csrf_token: 'csrf-settings', user: { email: 'teacher@example.com' } });
+  if (url === '/api/settings') return jsonResponse(200, { settings: teacherSettings });
+  if (url === '/api/line/rich-menu') return jsonResponse(200, menuFixture);
+  if (url === '/api/system') return jsonResponse(200, { database: {}, teacher_name: teacherSettings.teacher_name });
+  if (url === '/api/watcher/status') return jsonResponse(200, {});
+  if (url.startsWith('/api/students')) return jsonResponse(200, { students: [], summary: {} });
+  if (url.startsWith('/api/expenses')) return jsonResponse(200, { expenses: [], summary: {} });
+  throw new Error(`Unexpected fetch ${url}`);
+}
+
+test('settings page saves with CSRF, keeps draft on failure, and clears private fields on 401', async () => {
+  let saveStatus = 200;
+  const saves = [];
+  const { getEl, body } = runFrontendApp({ search: '?view=settings', fetchImpl: async (url, opts = {}) => {
+    if (url === '/api/settings' && opts.method === 'PUT') {
+      saves.push(opts);
+      return jsonResponse(saveStatus, saveStatus === 200 ? { settings: JSON.parse(opts.body) } : { detail: 'not saved' });
+    }
+    return richMenuFetch(url);
+  } });
+  await flushMicrotasks();
+  assert.equal(body.dataset.view, 'settings');
+  assert.equal(getEl('settings-classroom').value, teacherSettings.classroom);
+  getEl('settings-teacher-name').value = '<img src=x onerror=alert(1)>';
+  await getEl('settings-form').trigger('submit');
+  assert.equal(saves[0].headers['X-CSRF-Token'], 'csrf-settings');
+  assert.equal(JSON.parse(saves[0].body).teacher_name, '<img src=x onerror=alert(1)>');
+  assert.match(getEl('settings-save-status').textContent, /บันทึกแล้ว/);
+  saveStatus = 503;
+  getEl('settings-classroom').value = 'ยังเป็นฉบับร่าง';
+  await getEl('settings-form').trigger('submit');
+  assert.equal(getEl('settings-classroom').value, 'ยังเป็นฉบับร่าง');
+  assert.equal(getEl('settings-error').hidden, false);
+  assert.equal(getEl('settings-save-status').textContent, '');
+  saveStatus = 401;
+  await getEl('settings-form').trigger('submit');
+  assert.equal(body.dataset.authState, 'unauthenticated');
+  assert.equal(getEl('settings-page').hidden, true);
+  assert.equal(getEl('settings-teacher-name').value, '');
+  assert.equal(getEl('line-rich-menu').children.length, 0);
+});
+
+test('eight simulator hotspots dispatch postbacks, prefill search, and open the correct web views', async () => {
+  const sent = [];
+  const { getEl, body } = runFrontendApp({ fetchImpl: async (url, opts = {}) => {
+    if (url === '/api/line/simulate') {
+      sent.push(opts.body.entries.find(([key]) => key === 'postback_data')[1]);
+      return jsonResponse(200, { reply_text: 'พร้อมครับ', line_messages: [{ quickReply: { items: [
+        { action: { type: 'camera', label: 'ถ่ายรูปเอกสาร' } },
+        { action: { type: 'cameraRoll', label: 'เลือกรูปจากอัลบั้ม' } },
+      ] } }] });
+    }
+    return richMenuFetch(url);
+  } });
+  await flushMicrotasks();
+  const buttons = getEl('line-rich-menu').children.filter((node) => node.type === 'button');
+  assert.equal(buttons.length, 8);
+  for (const key of ['upload', 'summary', 'review', 'search', 'help']) {
+    await buttons.find((b) => b.dataset.richMenuKey === key).trigger('click');
+    assert.equal(sent.at(-1), `action=run_cmd&cmd=${key}`);
+  }
+  assert.equal(getEl('line-sim-text-input').value, 'ค้นหา ');
+  const quickReplies = getEl('line-quick-replies').children;
+  assert.equal(quickReplies.length, 2);
+  await quickReplies[0].trigger('click');
+  assert.equal(getEl('line-sim-file-input').attributes.capture, 'environment');
+  await quickReplies[1].trigger('click');
+  assert.equal(getEl('line-sim-file-input').attributes.capture, undefined);
+  for (const [key, modal] of [['expenses', 'expenses-modal'], ['students', 'students-modal']]) {
+    await buttons.find((b) => b.dataset.richMenuKey === key).trigger('click');
+    // Destination loaders also reset old filters before opening the existing dialogs.
+    assert.equal(getEl(key === 'expenses' ? 'expense-reimb-filter' : 'student-search-input').value, '');
+  }
+  await buttons.find((b) => b.dataset.richMenuKey === 'settings').trigger('click');
+  assert.equal(body.dataset.view, 'settings');
+  assert.equal(getEl('settings-page').hidden, false);
+});
+
+test('a LINE settings deep link survives a Google login round trip in this tab', async () => {
+  const sessionStorageData = new Map();
+  const first = runFrontendApp({ search: '?view=settings&openExternalBrowser=1', sessionStorageData,
+    fetchImpl: async (url) => {
+      assert.equal(url, '/api/auth/me');
+      return jsonResponse(200, { authenticated: false, auth_required: true });
+    },
+  });
+  await flushMicrotasks();
+  assert.equal(first.body.dataset.authState, 'unauthenticated');
+  assert.equal(sessionStorageData.get('nong-chok-pending-view'), 'settings');
+  const afterCallback = runFrontendApp({ sessionStorageData, fetchImpl: async (url) => richMenuFetch(url) });
+  await flushMicrotasks();
+  assert.equal(afterCallback.body.dataset.view, 'settings');
+  assert.equal(sessionStorageData.has('nong-chok-pending-view'), false);
+  assert.equal(afterCallback.replaceStateCalls.at(-1), '/?view=settings');
 });

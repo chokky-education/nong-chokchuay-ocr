@@ -6,6 +6,12 @@ A local-first and LINE OA-enabled document vault, classroom expense reimbursemen
 
 ## Language
 
+**Teacher Settings**:
+Shared vault preferences stored in SQLite `teacher_settings`: bot salutation (`teacher_name`), default classroom and default reimbursement status (`pending_reimbursement` / `personal`). Applied to new data in the shared ingestion pipeline, durably committed through R2 in cloud mode, never a retrospective edit or a per-account setting.
+
+**LINE Rich Menu**:
+The approved eight-area image pinned below the LINE chat. Postbacks use existing business logic; URI actions open authenticated web destinations. `rich_menu.py` supplies the same bounds and actions to provisioning and the web simulator. Distinct from message-scoped Flex Cards and Quick Replies.
+
 **Vault Document**:
 An archived image or PDF stored in SQLite along with its OCR text, line bounding boxes, review status, and classification metadata.
 _Avoid_: Record, Entry, Item

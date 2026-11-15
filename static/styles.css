@@ -1879,46 +1879,61 @@ main {
   flex: 1;
 }
 
+/* Approved artwork and LINE tap areas share one coordinate system. */
 .line-rich-menu {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  background: #f8fafc;
-  border-top: 1px solid #cbd5e1;
+  position: relative;
+  flex-shrink: 0;
+  background: var(--surface-warm);
+  border-top: 1px solid var(--surface-border);
 }
-
-.rich-menu-btn {
-  border: none;
-  border-right: 1px solid #e2e8f0;
-  border-bottom: 1px solid #e2e8f0;
+.line-rich-menu > img { display: block; width: 100%; height: auto; }
+.rich-menu-hotspot {
+  position: absolute;
+  border: 0;
+  padding: 0;
   background: transparent;
-  padding: 0.52rem 0.25rem;
   cursor: pointer;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.2rem;
-  font-family: inherit;
-  font-size: 0.7rem;
-  font-weight: 600;
-  color: #334155;
-  transition: background 0.15s ease;
 }
+.rich-menu-hotspot:hover { background: rgb(37 99 235 / 0.08); }
+.rich-menu-hotspot:focus-visible { outline: 3px solid var(--primary); outline-offset: -4px; }
+.rich-menu-hotspot:disabled { cursor: wait; background: rgb(252 251 247 / 0.2); }
 
-.rich-menu-btn:nth-child(3n) {
-  border-right: none;
+.settings-page {
+  width: min(720px, calc(100% - 32px));
+  margin: 28px auto 48px;
+  padding: 28px;
+  background: var(--surface-warm);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius);
 }
-
-.rich-menu-btn:nth-child(n+4) {
-  border-bottom: none;
+.settings-page[hidden] { display: none; }
+body[data-view="settings"] .hero-strip,
+body[data-view="settings"] #teacher-desk { display: none; }
+.settings-heading { display: flex; gap: 20px; align-items: center; margin: 24px 0; }
+.settings-heading img { flex: 0 0 96px; width: 96px; height: 112px; object-fit: contain; }
+.settings-heading h2 { font-family: var(--font-display); color: #1e3a8a; font-size: 1.65rem; margin-bottom: 8px; }
+.settings-note { padding: 16px; background: var(--primary-light); color: #1e3a8a; border-radius: 12px; margin-bottom: 24px; }
+.settings-page fieldset { border: 0; display: flex; flex-direction: column; min-width: 0; }
+.settings-page label { font-weight: 600; margin: 20px 0 8px; }
+.settings-page label:first-child { margin-top: 0; }
+.settings-page input, .settings-page select {
+  width: 100%; min-height: 48px; padding: 10px 12px;
+  font: inherit; color: var(--text-main); background: white;
+  border: 1px solid #94a3b8; border-radius: 10px; caret-color: var(--primary);
 }
-
-.rich-menu-btn:hover {
-  background: #eff6ff;
-  color: #1d4ed8;
-}
-
-.rm-icon {
-  font-size: 1.15rem;
+.settings-page input::placeholder { color: #64748b; }
+.settings-page input:focus-visible, .settings-page select:focus-visible,
+.settings-page button:focus-visible { outline: 3px solid var(--primary); outline-offset: 3px; }
+.settings-help { color: #475569; font-size: 0.85rem; margin-top: 8px; }
+.settings-page button[type="submit"] { align-self: flex-start; margin-top: 28px; min-height: 48px; }
+.settings-error { color: #9f1239; background: #fff1f2; padding: 12px; margin: 16px 0; border-radius: 10px; }
+.settings-save-status { color: #065f46; margin-top: 16px; }
+.settings-page ::selection { background: #fde68a; color: #1e3a8a; }
+@media (max-width: 640px) {
+  .settings-page { padding: 20px; margin-top: 16px; }
+  .settings-heading { gap: 12px; }
+  .settings-heading img { flex-basis: 64px; width: 64px; height: 80px; }
+  .settings-heading h2 { font-size: 1.35rem; }
 }
 
 @media (max-width: 640px) {
@@ -1942,14 +1957,6 @@ main {
     grid-template-columns: 92px 1fr;
   }
 
-  .rich-menu-btn {
-    padding: 0.42rem 0.2rem;
-    font-size: 0.67rem;
-  }
-
-  .rm-icon {
-    font-size: 1.02rem;
-  }
 }
 
 /* Auth Gate & User Pill (Sunny Sky & Golden Hour CI) */

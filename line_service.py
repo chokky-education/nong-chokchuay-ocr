@@ -1287,7 +1287,13 @@ def _build_help_menu_response(target_teacher: str, public_base_url: str = "") ->
         "• ส่งรูปใบเสร็จ / สลิป -> น้องโชคช่วยจดยอดรอเบิกให้\n"
         "• ส่งรูปสูติบัตร / ใบสมัครเด็ก -> เก็บชื่อ เลข 13 หลัก และป้ายเตือนแพ้อาหาร\n"
         "• ส่ง PDF คำสั่งโรงเรียน -> เก็บเข้าตู้เซฟค้นหาได้ตลอด\n"
-        '• พิมพ์ "ยอดรอเบิก", "แพ้อาหาร", หรือพิมพ์คุย/ค้นหาได้เลยครับ'
+        '• สรุปยอดเบิก: ดูยอดรอเบิกและเบิกคืนแล้ว\n'
+        '• รายการบิล: เปิดสมุดเบิกจ่าย แก้ไขสถานะและส่งออก CSV\n'
+        '• แฟ้มเด็ก: ดูรายชื่อ ข้อมูลผู้ปกครอง และกรองเด็กแพ้อาหาร\n'
+        '• เอกสารรอตรวจ: ตรวจข้อมูลที่อ่านมาแล้วกดยืนยัน\n'
+        '• ค้นหาเอกสาร: พิมพ์ "ค้นหา" ตามด้วยคำ เช่น ค้นหา สีเทียน\n'
+        '• ตั้งค่า: เปลี่ยนชื่อเรียก ห้องเรียน และสถานะเบิกจ่ายเริ่มต้น\n'
+        'ปุ่มที่เปิดเว็บจะใช้ Safari / Chrome และให้เข้าสู่ระบบ Google ก่อนครับ'
     )
     shortcuts = [
         {"label": "🏷️ ยอดรอเบิก", "cmd": "ยอดรอเบิก", "color": "amber"},
@@ -1309,7 +1315,7 @@ def _build_help_menu_response(target_teacher: str, public_base_url: str = "") ->
             theme_key="menu",
             header_title=f"🌤️ เมนูลัดน้องโชคช่วย ({target_teacher})",
             body_contents=[
-                {"type": "text", "text": "ส่งรูปบิล / สูติบัตรเข้าแชท หรือกดปุ่มลัดด้านล่างได้เลยครับ", "size": "sm", "color": "#334155", "wrap": True}
+                {"type": "text", "text": reply_text, "size": "sm", "color": "#334155", "wrap": True}
             ],
             footer_buttons=footer_buttons,
             hero_asset="menu",
@@ -1328,6 +1334,7 @@ def _build_help_menu_response(target_teacher: str, public_base_url: str = "") ->
         "card_view": {
             "kind": "menu",
             "theme": "menu",
+            "help_text": reply_text,
             "step_num": "7",
             "badge_title": "เมนูคำสั่งลัดในแชท",
             "mascot_image": _mascot_path("menu"),
@@ -1422,7 +1429,25 @@ def process_line_text_command(
             )
         )
 
-    if not clean or lower in {"เมนู", "คำสั่ง", "คำสั่งลัด", "help", "menu", "ช่วยด้วย"}:
+    if lower == "ส่งเอกสาร":
+        reply_text = (
+            f"ส่งรูปบิล / เอกสารได้เลยครับ{target_teacher}\n"
+            "เลือกถ่ายรูปหรือเลือกรูปจากอัลบั้มด้านล่าง ส่วน PDF ส่งเป็นไฟล์แนบในแชทได้เลยครับ\n"
+            "เมื่ออ่านเสร็จ กรุณาตรวจชื่อ ยอดเงิน และข้อมูลเด็กก่อนกดยืนยัน"
+        )
+        items = [
+            {"type": "action", "action": {"type": "camera", "label": "ถ่ายรูปเอกสาร"}},
+            {"type": "action", "action": {"type": "cameraRoll", "label": "เลือกรูปจากอัลบั้ม"}},
+        ]
+        return {"intent": "upload_guide", "reply_text": reply_text,
+                "line_messages": [{"type": "text", "text": reply_text, "quickReply": {"items": items}}]}
+
+    if lower in {"ค้นหาเอกสาร", "ค้นหา", "หา", "search"}:
+        reply_text = 'พิมพ์ "ค้นหา" ตามด้วยคำที่ต้องการครับ เช่น ค้นหา สีเทียน หรือ ค้นหา น้องมะลิ'
+        return {"intent": "search_guide", "reply_text": reply_text,
+                "line_messages": [{"type": "text", "text": reply_text}]}
+
+    if not clean or lower in {"เมนู", "คำสั่ง", "คำสั่งลัด", "help", "menu", "ช่วยด้วย", "วิธีใช้"}:
         return _build_help_menu_response(target_teacher=target_teacher, public_base_url=public_base_url)
 
     is_explicit_search = lower.startswith(("ค้นหา ", "หา ", "search "))
