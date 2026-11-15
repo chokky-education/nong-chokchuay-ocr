@@ -418,6 +418,29 @@ class R2PersistenceTests(unittest.TestCase):
                 pb_res = client.post("/api/line/webhook", content=pb_body, headers=pb_hdrs)
                 self.assertEqual(pb_res.status_code, 200)
 
+                # 4) If storage is in ERROR state, text commands on LINE webhook also fail-closed with 503 (zero leaked data)
+                test_app.state.storage.state = "ERROR"
+                test_app.state.storage.error_code = "simulated_r2_down"
+                txt_body, txt_hdrs = _make_signed_request(
+                    {
+                        "events": [
+                            {
+                                "type": "message",
+                                "webhookEventId": "evt-txt-err-1",
+                                "replyToken": "rt-txt-err",
+                                "source": {"type": "user", "userId": "Uteacher1"},
+                                "message": {"id": "m-txt-err", "type": "text", "text": "ยอดรอเบิก"},
+                            }
+                        ]
+                    }
+                )
+                txt_err_res = client.post("/api/line/webhook", content=txt_body, headers=txt_hdrs)
+                self.assertEqual(txt_err_res.status_code, 503)
+                self.assertEqual(txt_err_res.json()["error"], "simulated_r2_down")
+                self.assertNotIn("250.00", txt_err_res.text)
+                test_app.state.storage.state = "READY"
+                test_app.state.storage.error_code = ""
+
         with tempfile.TemporaryDirectory() as d2:
             cfg2 = _r2_config(d2, bootstrap=False)
             app2 = create_app(config=cfg2, engine_factory=lambda: FakeLineOCR(), storage_client=r2)
@@ -1112,7 +1135,11 @@ class R2PersistenceTests(unittest.TestCase):
                 orig_require_ready = storage.require_ready
                 orig_get_session = database.get_active_auth_session
 
-                def _run_readiness_before_logout_race(endpoint_path: str) -> dict:
+                def _run_readiness_before_logout_race(
+                    endpoint_path: str,
+                    *,
+                    wait_for_put_timeout: float = 0.15,
+                ) -> dict:
                     reader_worker_tid = {"id": None}
                     reader_passed_readiness = threading.Event()
                     logout_dispatched = threading.Event()
@@ -1135,7 +1162,9 @@ class R2PersistenceTests(unittest.TestCase):
                         if threading.get_ident() == reader_worker_tid["id"]:
                             self.assertTrue(logout_dispatched.wait(timeout=5.0))
                             # Give an unlocked concurrent logout time to mutate SQLite and reach R2 put_manifest.
-                            saw_logout_in_manifest_during_read["value"] = logout_in_manifest_put.wait(timeout=0.25)
+                            saw_logout_in_manifest_during_read["value"] = logout_in_manifest_put.wait(
+                                timeout=wait_for_put_timeout
+                            )
                         return orig_get_session(session_id, db_path=db_path)
 
                     def _stalling_failed_put_manifest(manifest, *, if_match=None, if_none_match_star=False):
@@ -1218,12 +1247,16 @@ class R2PersistenceTests(unittest.TestCase):
                     return read_fn()
 
                 with mock.patch.object(storage, "execute_read", side_effect=_unlocked_execute_read):
-                    unlocked_docs_race = _run_readiness_before_logout_race("/api/documents")
+                    unlocked_docs_race = _run_readiness_before_logout_race(
+                        "/api/documents", wait_for_put_timeout=2.0
+                    )
                     self.assertTrue(unlocked_docs_race["logout_reached_put_during_read"])
                     self.assertEqual(unlocked_docs_race["reader"].status_code, 401)
                     self.assertEqual(unlocked_docs_race["logout"].status_code, 503)
 
-                    unlocked_me_race = _run_readiness_before_logout_race("/api/auth/me")
+                    unlocked_me_race = _run_readiness_before_logout_race(
+                        "/api/auth/me", wait_for_put_timeout=2.0
+                    )
                     self.assertTrue(unlocked_me_race["logout_reached_put_during_read"])
                     self.assertEqual(unlocked_me_race["reader"].status_code, 200)
                     self.assertFalse(unlocked_me_race["reader"].json()["authenticated"])

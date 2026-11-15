@@ -76,7 +76,7 @@ def _maybe_hero(
     background_color: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     base_url = (public_base_url or "").strip().rstrip("/")
-    if not base_url.startswith("http"):
+    if not base_url.lower().startswith("https://"):
         return None
     hero: Dict[str, Any] = {
         "type": "image",
@@ -90,6 +90,29 @@ def _maybe_hero(
     return hero
 
 
+def _truncate_line_label(label: str, limit: int = 20) -> str:
+    clean = " ".join((label or "").split()).strip()
+    if not clean:
+        return "กดเลือก"
+    if len(clean) <= limit:
+        return clean
+    if "(" in clean and clean.endswith(")"):
+        head, tail = clean.rsplit("(", 1)
+        suffix = f"({tail}"
+        if len(suffix) <= 7 and limit - len(suffix) - 1 >= 4:
+            prefix = head.rstrip()[: limit - len(suffix) - 1].rstrip(" (")
+            return f"{prefix}…{suffix}"[:limit]
+        inner_cut = clean[: max(1, limit - 2)].rstrip(" (")
+        if "(" in inner_cut:
+            return f"{inner_cut}…)"[:limit]
+    trimmed = clean[: max(1, limit - 1)].rstrip(" (")
+    return f"{trimmed}…"[:limit]
+
+
+def _encode_postback(params: Dict[str, str]) -> str:
+    return urlencode({k: v for k, v in params.items() if v is not None})[:300]
+
+
 def _build_quick_replies(pairs: List[Tuple[str, str]]) -> List[Dict[str, str]]:
     return [{"label": label, "text": cmd} for label, cmd in pairs if label and cmd]
 
@@ -100,25 +123,36 @@ def _attach_line_quick_reply(
 ) -> List[Dict[str, Any]]:
     if not line_messages or not quick_replies:
         return line_messages
+    items = [
+        {
+            "type": "action",
+            "action": {
+                "type": "message",
+                "label": _truncate_line_label(item["label"], 20),
+                "text": (item["text"] or "")[:300],
+            },
+        }
+        for item in quick_replies[:13]
+        if (item.get("text") or "").strip()
+    ]
+    if not items:
+        return line_messages
     last = dict(line_messages[-1])
-    last["quickReply"] = {
-        "items": [
-            {
-                "type": "action",
-                "action": {
-                    "type": "message",
-                    "label": item["label"][:20],
-                    "text": item["text"],
-                },
-            }
-            for item in quick_replies[:13]
-        ]
-    }
+    last["quickReply"] = {"items": items}
     return [*line_messages[:-1], last]
 
 
 def _digits_only(phone: str) -> str:
     return "".join(ch for ch in (phone or "") if ch.isdigit())
+
+
+def _format_tel_uri(phone: str) -> str:
+    raw = (phone or "").strip()
+    digits = _digits_only(raw)
+    if len(digits) < 3:
+        return ""
+    prefix = "+" if raw.startswith("+") else ""
+    return f"tel:{prefix}{digits}"
 
 
 def _build_flex_button(
@@ -131,7 +165,7 @@ def _build_flex_button(
         "type": "button",
         "style": style,
         "height": "sm",
-        "action": {**action_obj, "label": label[:20]},
+        "action": {**action_obj, "label": _truncate_line_label(label, 20)},
     }
     if color:
         btn["color"] = color
@@ -453,7 +487,7 @@ def build_nong_chok_reply_summary(
             "label": "✓ ยืนยันยอดถูก" if expense else "✅ ยืนยันข้อมูล",
             "action": "confirm_review",
             "doc_id": doc_id,
-            "data": f"action=confirm_review&doc_id={doc_id}",
+            "data": _encode_postback({"action": "confirm_review", "doc_id": doc_id}),
         }
     ]
 
@@ -486,7 +520,7 @@ def build_nong_chok_reply_summary(
                     "label": "💸 เบิกคืนแล้ว",
                     "action": "mark_reimbursed",
                     "doc_id": doc_id,
-                    "data": f"action=mark_reimbursed&doc_id={doc_id}",
+                    "data": _encode_postback({"action": "mark_reimbursed", "doc_id": doc_id}),
                 }
             )
         actions.append(
@@ -559,14 +593,15 @@ def build_nong_chok_reply_summary(
             f"• เบอร์ผู้ปกครอง: {phone}\n"
             f"• แพ้อาหาร/ระวังพิเศษ: {warn_text}"
         )
-        if phone != "-":
+        tel_uri = _format_tel_uri(phone)
+        if tel_uri:
             actions.append(
                 {
                     "label": "📞 โทรผู้ปกครอง",
                     "action": "call_parent",
                     "doc_id": doc_id,
                     "phone": phone,
-                    "url": f"tel:{_digits_only(phone)}",
+                    "url": tel_uri,
                 }
             )
         actions.append(
@@ -739,14 +774,18 @@ def _build_reimbursement_summary_response(
 
     actions: List[Dict[str, str]] = [
         {
-            "label": f"📄 ดูรายการค้างตรวจ ({pending_docs})" if pending_docs else "📄 ดูรายการรอตรวจ",
+            "label": f"📄 รอตรวจ ({pending_docs} ใบ)" if pending_docs else "📄 ดูรายการรอตรวจ",
             "action": "run_cmd",
             "cmd": "รอตรวจ",
-            "data": "action=run_cmd&cmd=รอตรวจ",
+            "data": _encode_postback({"action": "run_cmd", "cmd": "รอตรวจ"}),
         }
     ]
     base_url = (public_base_url or "").strip().rstrip("/")
-    external_web_url = append_external_browser_param(base_url) if base_url.startswith("http") else ""
+    external_web_url = (
+        append_external_browser_param(base_url)
+        if base_url.lower().startswith(("http://", "https://"))
+        else ""
+    )
     if external_web_url:
         actions.append({"label": "💻 เปิดตารางเบิกเงิน", "action": "open_web", "url": external_web_url})
 
@@ -889,13 +928,13 @@ def _build_allergy_watchlist_response(
     footer_buttons: List[Dict[str, Any]] = []
     actions: List[Dict[str, str]] = []
     first_phone_stu = next(
-        (cs for cs in card_students if cs["parent_phone"] != "-" and _digits_only(cs["parent_phone"])),
+        (cs for cs in card_students if _format_tel_uri(cs["parent_phone"])),
         None,
     )
     if first_phone_stu:
-        tel_uri = f"tel:{_digits_only(first_phone_stu['parent_phone'])}"
+        tel_uri = _format_tel_uri(first_phone_stu["parent_phone"])
         actions.append({
-            "label": f"📞 โทรด่วน ({first_phone_stu['name']})",
+            "label": _truncate_line_label(f"📞 โทรด่วน ({first_phone_stu['name']})", 20),
             "action": "call_parent",
             "phone": first_phone_stu["parent_phone"],
             "name": first_phone_stu["name"],
@@ -1015,6 +1054,7 @@ def _build_pending_review_carousel_response(
             subtitle = d.get("category") or "เอกสาร"
             icon = "📄"
 
+        confirm_data = _encode_postback({"action": "confirm_review", "doc_id": str(d["id"])})
         items.append({
             "index": idx,
             "doc_id": d["id"],
@@ -1023,7 +1063,7 @@ def _build_pending_review_carousel_response(
             "title": title,
             "subtitle": subtitle,
             "icon": icon,
-            "confirm_data": f"action=confirm_review&doc_id={d['id']}",
+            "confirm_data": confirm_data,
         })
         bubbles.append(
             _assemble_bubble(
@@ -1035,7 +1075,7 @@ def _build_pending_review_carousel_response(
                     {"type": "text", "text": f"ไฟล์: {d['filename']}", "size": "xs", "color": "#64748B", "wrap": True},
                 ],
                 footer_buttons=[
-                    _build_flex_button("✅ ยืนยันตรวจแล้ว", {"type": "postback", "data": f"action=confirm_review&doc_id={d['id']}"}, style="primary", color="#2563EB")
+                    _build_flex_button("✅ ยืนยันตรวจแล้ว", {"type": "postback", "data": confirm_data}, style="primary", color="#2563EB")
                 ],
                 hero_asset="pending",
                 public_base_url=base_url,
@@ -1121,6 +1161,31 @@ def _build_search_carousel_response(
                 "doc_id": stu.get("document_id") or "",
                 "cmd": "แพ้อาหาร" if not stu.get("document_id") else "",
             })
+            stu_doc_id = (stu.get("document_id") or "").strip()
+            stu_tel = _format_tel_uri(stu.get("parent_phone") or "")
+            stu_footer_btns: List[Dict[str, Any]] = []
+            if stu_doc_id and base_url.lower().startswith(("http://", "https://")):
+                stu_doc_url = append_external_browser_param(f"{base_url}/?doc={stu_doc_id}")
+                stu_footer_btns.append(
+                    _build_flex_button("เปิดเอกสาร", {"type": "uri", "uri": stu_doc_url}, style="primary", color="#0D9488")
+                )
+            if stu_tel:
+                stu_footer_btns.append(
+                    _build_flex_button(
+                        "📞 โทรผู้ปกครอง",
+                        {"type": "uri", "uri": stu_tel},
+                        style="secondary" if stu_footer_btns else "primary",
+                        color=None if stu_footer_btns else "#0D9488",
+                    )
+                )
+            if not stu_footer_btns:
+                stu_footer_btns.append(
+                    _build_flex_button(
+                        "⚠️ ดูแพ้อาหาร",
+                        {"type": "postback", "data": _encode_postback({"action": "run_cmd", "cmd": "แพ้อาหาร"})},
+                        style="secondary",
+                    )
+                )
             bubbles.append(
                 _assemble_bubble(
                     theme_key="search",
@@ -1129,6 +1194,7 @@ def _build_search_carousel_response(
                         {"type": "text", "text": f"{stu['full_name']}{nick}", "size": "md", "weight": "bold", "color": "#1E293B", "wrap": True},
                         {"type": "text", "text": f"ห้อง {stu.get('classroom') or 'อนุบาล'} • โทร {stu.get('parent_phone') or '-'}", "size": "xs", "color": "#475569", "wrap": True},
                     ],
+                    footer_buttons=stu_footer_btns,
                     hero_asset="search",
                     public_base_url=base_url,
                 )
@@ -1208,7 +1274,11 @@ def _build_help_menu_response(target_teacher: str, public_base_url: str = "") ->
         {"label": "📥 รอตรวจ", "cmd": "รอตรวจ", "color": "blue"},
     ]
     footer_buttons = [
-        _build_flex_button(sc["label"], {"type": "postback", "data": f"action=run_cmd&cmd={sc['cmd']}"}, style="secondary")
+        _build_flex_button(
+            sc["label"],
+            {"type": "postback", "data": _encode_postback({"action": "run_cmd", "cmd": sc["cmd"]})},
+            style="secondary",
+        )
         for sc in shortcuts
     ]
     flex_message = {
@@ -1254,33 +1324,46 @@ def process_line_text_command(
     public_base_url: str = "",
     config: Optional[AppConfig] = None,
     teacher_name: Optional[str] = None,
+    storage: Optional[VaultStorageCoordinator] = None,
 ) -> Dict[str, Any]:
     """Process teacher chat text commands, Gemini assistant chat, or vault searches."""
+    if storage is not None:
+        storage.require_ready()
+
+    def _run_db_read(read_fn):
+        return storage.execute_read(read_fn) if storage is not None else read_fn()
+
     target_teacher = _resolve_teacher_name(config, teacher_name)
     r2_enabled = bool(config and config.is_r2_enabled())
     clean = (text or "").strip()
     lower = clean.lower()
 
     if lower in {"ยอดรอเบิก", "สรุปยอด", "เบิกเงิน", "ค่าใช้จ่าย"}:
-        return _build_reimbursement_summary_response(
-            db_path=db_path,
-            target_teacher=target_teacher,
-            public_base_url=public_base_url,
+        return _run_db_read(
+            lambda: _build_reimbursement_summary_response(
+                db_path=db_path,
+                target_teacher=target_teacher,
+                public_base_url=public_base_url,
+            )
         )
 
     if lower in {"แพ้อาหาร", "รายชื่อเด็ก", "ข้อมูลเด็ก", "เด็กในห้อง"}:
-        return _build_allergy_watchlist_response(
-            db_path=db_path,
-            target_teacher=target_teacher,
-            public_base_url=public_base_url,
+        return _run_db_read(
+            lambda: _build_allergy_watchlist_response(
+                db_path=db_path,
+                target_teacher=target_teacher,
+                public_base_url=public_base_url,
+            )
         )
 
     if lower in {"รอตรวจ", "ค้างตรวจ"}:
-        return _build_pending_review_carousel_response(
-            db_path=db_path,
-            target_teacher=target_teacher,
-            public_base_url=public_base_url,
-            r2_enabled=r2_enabled,
+        return _run_db_read(
+            lambda: _build_pending_review_carousel_response(
+                db_path=db_path,
+                target_teacher=target_teacher,
+                public_base_url=public_base_url,
+                r2_enabled=r2_enabled,
+            )
         )
 
     if not clean or lower in {"เมนู", "คำสั่ง", "คำสั่งลัด", "help", "menu", "ช่วยด้วย"}:
@@ -1288,13 +1371,16 @@ def process_line_text_command(
 
     is_explicit_search = lower.startswith(("ค้นหา ", "หา ", "search "))
     if not is_explicit_search:
-        ai_reply = generate_nong_chok_ai_reply(
-            user_text=clean or "สวัสดี",
-            db_context=_build_teacher_db_context(
+        db_context = _run_db_read(
+            lambda: _build_teacher_db_context(
                 db_path=db_path,
                 search_query=clean,
                 r2_enabled=r2_enabled,
-            ),
+            )
+        )
+        ai_reply = generate_nong_chok_ai_reply(
+            user_text=clean or "สวัสดี",
+            db_context=db_context,
             config=config,
             teacher_name=target_teacher,
         )
@@ -1327,12 +1413,14 @@ def process_line_text_command(
             search_term = clean[len(prefix):].strip()
             break
 
-    return _build_search_carousel_response(
-        search_term=search_term,
-        db_path=db_path,
-        target_teacher=target_teacher,
-        public_base_url=public_base_url,
-        r2_enabled=r2_enabled,
+    return _run_db_read(
+        lambda: _build_search_carousel_response(
+            search_term=search_term,
+            db_path=db_path,
+            target_teacher=target_teacher,
+            public_base_url=public_base_url,
+            r2_enabled=r2_enabled,
+        )
     )
 
 
@@ -1369,6 +1457,7 @@ def handle_line_postback(
             public_base_url=resolved_base_url,
             config=config,
             teacher_name=target_teacher,
+            storage=storage,
         )
         return {"success": True, "action": action, **cmd_res}
 
@@ -1385,7 +1474,11 @@ def handle_line_postback(
             "line_messages": [{"type": "text", "text": reply_text}],
         }
 
-    doc = database.get_document_by_id(doc_id, db_path=db_path, r2_enabled=r2_enabled)
+    doc = (
+        storage.execute_read(lambda: database.get_document_by_id(doc_id, db_path=db_path, r2_enabled=r2_enabled))
+        if storage is not None
+        else database.get_document_by_id(doc_id, db_path=db_path, r2_enabled=r2_enabled)
+    )
     if not doc:
         reply_text = f"ไม่พบเอกสารนี้ในฐานข้อมูลแล้วครับ{target_teacher}"
         return {
@@ -1413,7 +1506,9 @@ def handle_line_postback(
                 db_path=db_path,
                 r2_enabled=r2_enabled,
             )
-            reply_text = f'✅ น้องโชคยืนยันตรวจเอกสาร "{doc["filename"]}" เรียบร้อยแล้วครับ{target_teacher}!'
+            fresh_doc = updated or doc
+            doc_filename = fresh_doc.get("filename") or "เอกสาร"
+            reply_text = f'✅ น้องโชคยืนยันตรวจเอกสาร "{doc_filename}" เรียบร้อยแล้วครับ{target_teacher}!'
             flex_message = {
                 "type": "flex",
                 "altText": reply_text[:400],
@@ -1451,13 +1546,15 @@ def handle_line_postback(
 
     if action == "mark_reimbursed":
         def _do_reimburse(_rev: int) -> Dict[str, Any]:
-            database.update_document_metadata(
+            updated = database.update_document_metadata(
                 doc_id=doc_id,
                 review_status="reviewed",
                 db_path=db_path,
                 r2_enabled=r2_enabled,
             )
-            exp = doc.get("expense")
+            fresh_doc = updated or doc
+            doc_filename = fresh_doc.get("filename") or "เอกสาร"
+            exp = fresh_doc.get("expense")
             if exp:
                 updated_exp = database.upsert_expense(
                     document_id=doc_id,
@@ -1476,7 +1573,7 @@ def handle_line_postback(
                 )
                 reply_text = (
                     f"💸 บันทึกว่าเบิกเงินคืนจากโรงเรียนแล้ว ({updated_exp['total_amount']:,.2f} บาท) "
-                    f"สำหรับบิล {updated_exp['merchant'] or doc['filename']} ครับ{target_teacher}!"
+                    f"สำหรับบิล {updated_exp['merchant'] or doc_filename} ครับ{target_teacher}!"
                 )
                 flex_message = {
                     "type": "flex",

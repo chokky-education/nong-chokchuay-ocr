@@ -544,6 +544,7 @@ test('upload preserves Idempotency-Key across transient 503 retry and rotates af
 });
 
 test('LINE simulator renders Mascot Card + Quick Replies safely via DOM and clears them on logout', async () => {
+  const expenseQueries = [];
   const { getEl, body } = runFrontendApp({
     fetchImpl: async (url) => {
       if (url === '/api/auth/me') {
@@ -557,13 +558,18 @@ test('LINE simulator renders Mascot Card + Quick Replies safely via DOM and clea
       }
       if (url === '/api/system') return jsonResponse(200, { database: {} });
       if (url === '/api/watcher/status') return jsonResponse(200, { inbox_pending_count: 0 });
+      if (url.startsWith('/api/expenses?')) {
+        expenseQueries.push(url);
+        return jsonResponse(200, { summary: {}, expenses: [] });
+      }
       if (url === '/api/line/simulate') {
         return jsonResponse(200, {
           mode: 'text',
           intent: 'reimbursement_summary',
           reply_text: 'สรุปยอดเงิน',
           actions: [
-            { label: '📄 ดูรายการรอตรวจ', action: 'run_cmd', cmd: 'รอตรวจ', data: 'action=run_cmd&cmd=รอตรวจ' },
+            { label: '📄 รอตรวจ (2 ใบ)', action: 'run_cmd', cmd: 'รอตรวจ', data: 'action=run_cmd&cmd=%E0%B8%A3%E0%B8%AD%E0%B8%95%E0%B8%A3%E0%B8%A7%E0%B8%88' },
+            { label: '💻 เปิดตารางเบิกเงิน', action: 'open_web', url: 'https://nongchok.example.com?openExternalBrowser=1' },
           ],
           card_view: {
             kind: 'expense_summary',
@@ -590,8 +596,9 @@ test('LINE simulator renders Mascot Card + Quick Replies safely via DOM and clea
 
   await flushMicrotasks();
 
-  // Opening LINE simulator populates default quick reply chips
+  // Opening LINE simulator populates welcome greeting bubble + default quick reply chips
   await getEl('btn-open-line-sim').click();
+  assert.equal(getEl('line-chat-messages').children.length, 1);
   assert.equal(getEl('line-quick-replies').children.length, 4);
 
   // Sending "ยอดรอเบิก" appends user bubble + Mascot card bot message + updated quick replies
@@ -600,13 +607,24 @@ test('LINE simulator renders Mascot Card + Quick Replies safely via DOM and clea
   await flushMicrotasks();
 
   const chatRows = getEl('line-chat-messages').children;
-  assert.equal(chatRows.length, 2);
-  const botRow = chatRows[1];
+  assert.equal(chatRows.length, 3);
+  const botRow = chatRows[2];
   assert.equal(botRow.children[0].src, '/static/mascot_cards/avatar.png');
   const mascotCard = botRow.children[1].children[0];
   assert.equal(mascotCard.className, 'line-mascot-card theme-summary');
   assert.equal(getEl('line-quick-replies').children.length, 2);
   assert.equal(getEl('line-quick-replies').children[0].textContent, '📥 ดูรายการค้างตรวจ');
+
+  // Clicking "💻 เปิดตารางเบิกเงิน" (open_web) sets pending_reimbursement filter and loads expenses ledger
+  const cardBody = mascotCard.children[1];
+  const actionsRow = cardBody.children[cardBody.children.length - 1];
+  const openWebBtn = actionsRow.children[1];
+  getEl('expense-month-filter').value = '2026-10';
+  await openWebBtn.click();
+  await flushMicrotasks();
+  assert.equal(getEl('expense-reimb-filter').value, 'pending_reimbursement');
+  assert.equal(getEl('expense-month-filter').value, '');
+  assert.ok(expenseQueries.some((u) => u.includes('reimbursement_status=pending_reimbursement')));
 
   // Logout clears both chat messages and quick replies
   await getEl('btn-logout').click();
@@ -614,4 +632,8 @@ test('LINE simulator renders Mascot Card + Quick Replies safely via DOM and clea
   assert.equal(body.dataset.authState, 'unauthenticated');
   assert.equal(getEl('line-chat-messages').children.length, 0);
   assert.equal(getEl('line-quick-replies').children.length, 0);
+
+  // Re-opening simulator restores welcome bubble cleanly
+  await getEl('btn-open-line-sim').click();
+  assert.equal(getEl('line-chat-messages').children.length, 1);
 });

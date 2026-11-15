@@ -497,6 +497,87 @@ class NongChokChuayTests(unittest.TestCase):
         self.assertEqual(res_oa["model"], "gpt-4o-mini")
         self.assertEqual(mock_oa_post.call_args.kwargs["json"]["model"], "gpt-4o-mini")
 
+    def _assert_valid_line_messages(self, messages):
+        self.assertIsInstance(messages, list)
+        self.assertGreaterEqual(len(messages), 1)
+        self.assertLessEqual(len(messages), 5)
+
+        for msg in messages:
+            mtype = msg.get("type")
+            self.assertIn(mtype, {"text", "flex"})
+
+            if "quickReply" in msg:
+                qr_items = msg["quickReply"].get("items") or []
+                self.assertGreaterEqual(len(qr_items), 1)
+                self.assertLessEqual(len(qr_items), 13)
+                for item in qr_items:
+                    self.assertEqual(item.get("type"), "action")
+                    act = item.get("action") or {}
+                    self.assertEqual(act.get("type"), "message")
+                    lbl = act.get("label") or ""
+                    txt = act.get("text") or ""
+                    self.assertTrue(1 <= len(lbl) <= 20, f"Invalid quickReply label length: {lbl!r}")
+                    self.assertFalse(lbl.endswith("("), f"Dangling '(' in quickReply label: {lbl!r}")
+                    self.assertEqual(lbl.count("("), lbl.count(")"), f"Unbalanced parens in quickReply label: {lbl!r}")
+                    self.assertTrue(1 <= len(txt) <= 300, f"Invalid quickReply text length: {txt!r}")
+
+            if mtype == "text":
+                self.assertTrue(1 <= len(msg.get("text") or "") <= 5000)
+                continue
+
+            alt_text = msg.get("altText") or ""
+            self.assertTrue(1 <= len(alt_text) <= 400, f"Invalid Flex altText length: {len(alt_text)}")
+            contents = msg.get("contents") or {}
+            ctype = contents.get("type")
+            self.assertIn(ctype, {"bubble", "carousel"})
+            bubbles = contents.get("contents") if ctype == "carousel" else [contents]
+            self.assertIsInstance(bubbles, list)
+            self.assertTrue(1 <= len(bubbles) <= 12, f"Invalid carousel bubble count: {len(bubbles)}")
+
+            for bubble in bubbles:
+                self.assertEqual(bubble.get("type"), "bubble")
+                body = bubble.get("body") or {}
+                self.assertTrue(len(body.get("contents") or []) >= 1)
+
+                if "hero" in bubble:
+                    hero = bubble["hero"]
+                    self.assertEqual(hero.get("type"), "image")
+                    self.assertTrue(
+                        (hero.get("url") or "").startswith("https://"),
+                        f"LINE Flex hero.url must be https://, got {hero.get('url')!r}",
+                    )
+                    self.assertEqual(hero.get("aspectMode"), "fit")
+                    self.assertTrue(bool(hero.get("backgroundColor")))
+
+                if "footer" in bubble:
+                    f_btns = bubble["footer"].get("contents") or []
+                    self.assertTrue(1 <= len(f_btns) <= 5, f"Invalid footer button count: {len(f_btns)}")
+                    for btn in f_btns:
+                        self.assertEqual(btn.get("type"), "button")
+                        act = btn.get("action") or {}
+                        lbl = act.get("label") or ""
+                        self.assertTrue(1 <= len(lbl) <= 20, f"Invalid Flex button label ({len(lbl)}): {lbl!r}")
+                        self.assertFalse(lbl.endswith("("), f"Dangling '(' in Flex button label: {lbl!r}")
+                        self.assertEqual(lbl.count("("), lbl.count(")"), f"Unbalanced parens in Flex button label: {lbl!r}")
+                        atype = act.get("type")
+                        self.assertIn(atype, {"postback", "uri", "message"})
+                        if atype == "postback":
+                            data = act.get("data") or ""
+                            self.assertTrue(1 <= len(data) <= 300, f"Invalid postback data: {data!r}")
+                        elif atype == "uri":
+                            uri = act.get("uri") or ""
+                            self.assertTrue(1 <= len(uri) <= 1000, f"Invalid URI length: {uri!r}")
+                            if uri.startswith("tel:"):
+                                tel_body = uri[4:]
+                                digits = "".join(ch for ch in tel_body if ch.isdigit())
+                                self.assertGreaterEqual(len(digits), 3, f"Invalid tel URI without digits: {uri!r}")
+                                self.assertNotIn("openExternalBrowser", uri)
+                            else:
+                                self.assertTrue(
+                                    uri.startswith(("https://", "http://")),
+                                    f"Unexpected URI scheme: {uri!r}",
+                                )
+
     def test_line_mascot_cards_all_seven_scenarios_and_assets(self):
         # 0. All 9 mascot card PNG assets exist and are served over HTTP
         asset_paths = [
@@ -652,6 +733,73 @@ class NongChokChuayTests(unittest.TestCase):
         ).json()
         self.assertTrue(r_runcmd["success"])
         self.assertEqual(r_runcmd["card_view"]["kind"], "expense_summary")
+
+        # 8. Strict LINE Messaging API schema validation across all generated responses + edge cases
+        for payload in (rec_summary_with_url, stu_data, r_pend, r_sum, r_alg, r_srch, r_menu, r_conf, r_runcmd):
+            self._assert_valid_line_messages(payload["line_messages"])
+
+        # Edge case A: Student with non-digit phone ("ไม่มี") MUST NOT emit invalid "tel:" URI
+        no_phone_summary = line_service.build_nong_chok_reply_summary(
+            {"doc_id": "doc-no-phone", "filename": "student_no_phone.png"},
+            student={
+                "full_name": "เด็กชายกล้า เก่งกาจ",
+                "nickname": "น้องกล้า",
+                "classroom": "อนุบาล 2/1",
+                "parent_phone": "ไม่มี",
+                "allergies": "แพ้อาหารทะเล",
+            },
+            public_base_url=base_url,
+            config=self.cfg,
+        )
+        self.assertEqual([a for a in no_phone_summary["actions"] if a["action"] == "call_parent"], [])
+        self._assert_valid_line_messages(no_phone_summary["line_messages"])
+
+        # Edge case B: International +66 phone & very long student nickname keep valid tel: and <=20-char balanced label
+        plus_phone_summary = line_service.build_nong_chok_reply_summary(
+            {"doc_id": "doc-plus-phone", "filename": "student_plus.png"},
+            student={
+                "full_name": "เด็กหญิงใบบัวชมพู รักเรียนยิ่ง",
+                "nickname": "น้องใบบัวชมพูหวานใจคุณครู",
+                "classroom": "อนุบาล 3/1",
+                "parent_phone": "+66 89-777-8888",
+                "allergies": "แพ้นมวัว",
+            },
+            public_base_url=base_url,
+            config=self.cfg,
+        )
+        plus_calls = [a for a in plus_phone_summary["actions"] if a["action"] == "call_parent"]
+        self.assertEqual(plus_calls[0]["url"], "tel:+66897778888")
+        self._assert_valid_line_messages(plus_phone_summary["line_messages"])
+
+        long_lbl = line_service._truncate_line_label("📞 โทรด่วน (น้องใบบัวชมพูหวานใจคุณครู)", 20)
+        self.assertLessEqual(len(long_lbl), 20)
+        self.assertEqual(long_lbl.count("("), long_lbl.count(")"))
+        self.assertTrue(long_lbl.endswith(")"))
+
+        # Edge case C: Plain http:// base URL omits Flex hero (LINE requires https://) while keeping Simulator mascot_image
+        http_summary = line_service.build_nong_chok_reply_summary(
+            rec_data["ocr"],
+            expense=rec_data["ocr"].get("expense"),
+            public_base_url="http://localhost:8765",
+            config=self.cfg,
+        )
+        self.assertNotIn("hero", http_summary["flex_message"]["contents"])
+        self.assertEqual(http_summary["card_view"]["mascot_image"], "/static/mascot_cards/hero_receipt.png")
+        self._assert_valid_line_messages(http_summary["line_messages"])
+
+        # Edge case D: Search carousel matching student ("ใบบัว") includes actionable footer buttons on LINE
+        r_srch_stu = line_service.process_line_text_command(
+            "ค้นหา ใบบัว",
+            db_path=self.cfg.db_path,
+            public_base_url=base_url,
+            config=self.cfg,
+        )
+        self._assert_valid_line_messages(r_srch_stu["line_messages"])
+        stu_bubble = r_srch_stu["flex_message"]["contents"]
+        if stu_bubble.get("type") == "carousel":
+            stu_bubble = stu_bubble["contents"][0]
+        self.assertIn("footer", stu_bubble)
+        self.assertGreaterEqual(len(stu_bubble["footer"]["contents"]), 1)
 
 
 if __name__ == "__main__":

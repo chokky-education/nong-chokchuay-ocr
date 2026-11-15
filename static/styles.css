@@ -1908,6 +1908,10 @@ main {
   border-right: none;
 }
 
+.rich-menu-btn:nth-child(n+4) {
+  border-bottom: none;
+}
+
 .rich-menu-btn:hover {
   background: #eff6ff;
   color: #1d4ed8;
@@ -1915,6 +1919,37 @@ main {
 
 .rm-icon {
   font-size: 1.15rem;
+}
+
+@media (max-width: 640px) {
+  .line-sim-shell {
+    width: 100%;
+    max-width: 100%;
+    height: 92vh;
+    max-height: none;
+    border-radius: 16px 16px 0 0;
+  }
+
+  .line-chat-messages {
+    padding: 0.75rem;
+  }
+
+  .mc-hero-img {
+    max-height: 132px;
+  }
+
+  .mc-allergy-split {
+    grid-template-columns: 92px 1fr;
+  }
+
+  .rich-menu-btn {
+    padding: 0.42rem 0.2rem;
+    font-size: 0.67rem;
+  }
+
+  .rm-icon {
+    font-size: 1.02rem;
+  }
 }
 
 /* Auth Gate & User Pill (Sunny Sky & Golden Hour CI) */

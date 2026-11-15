@@ -78,6 +78,7 @@
     lineBoxes: [],
     pendingUploadKey: '',
     pendingUploadSignature: '',
+    lineSimBusy: false,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -374,6 +375,9 @@
     if (els.studentsList) els.studentsList.innerHTML = '';
     if (els.lineChatMessages) els.lineChatMessages.innerHTML = '';
     if (els.lineQuickReplies) els.lineQuickReplies.innerHTML = '';
+    state.lineSimBusy = false;
+    if (els.btnLineSimSend) els.btnLineSimSend.disabled = false;
+    if (els.btnLineSimPhoto) els.btnLineSimPhoto.disabled = false;
 
     if (els.dbCountBadge) els.dbCountBadge.textContent = '0';
     if (els.inboxCountBadge) els.inboxCountBadge.textContent = '0';
@@ -1415,6 +1419,37 @@
     }
   }
 
+  function setLineSimBusy(busy) {
+    state.lineSimBusy = Boolean(busy);
+    if (els.btnLineSimSend) els.btnLineSimSend.disabled = state.lineSimBusy;
+    if (els.btnLineSimPhoto) els.btnLineSimPhoto.disabled = state.lineSimBusy;
+  }
+
+  function ensureLineWelcomeGreeting() {
+    if (!els.lineChatMessages) return;
+    const hasMessages = Array.isArray(els.lineChatMessages.children)
+      ? els.lineChatMessages.children.length > 0
+      : Boolean(els.lineChatMessages.innerHTML && els.lineChatMessages.innerHTML.trim());
+    if (hasMessages) return;
+
+    const row = document.createElement('div');
+    row.className = 'line-msg line-msg-bot';
+
+    const avatar = document.createElement('img');
+    avatar.src = '/static/mascot_cards/avatar.png';
+    avatar.alt = 'น้องโชค';
+    avatar.className = 'line-msg-avatar';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'line-bubble line-bubble-bot';
+    bubble.textContent =
+      'สวัสดีครับครูพิ้งกี้! 🌤️ นี่คือแชท LINE OA ของน้องโชคช่วยครับ\n' +
+      'ครูพิ้งกี้ลองกดส่งรูปบิลจากร้านค้า กดปุ่มชิปลัด หรือเลือกจากเมนูด้านล่างได้เลยนะครับ';
+
+    row.append(avatar, bubble);
+    els.lineChatMessages.appendChild(row);
+  }
+
   function appendLineUserMessage(text, imageUrl = '') {
     const row = document.createElement('div');
     row.className = 'line-msg line-msg-user';
@@ -1422,6 +1457,11 @@
     bubble.className = 'line-bubble line-bubble-user';
     if (imageUrl) {
       const img = document.createElement('img');
+      if (String(imageUrl).startsWith('blob:') && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+        const revokeBlob = () => URL.revokeObjectURL(imageUrl);
+        img.addEventListener('load', revokeBlob, { once: true });
+        img.addEventListener('error', revokeBlob, { once: true });
+      }
       img.src = imageUrl;
       img.alt = 'ภาพที่ส่งเข้า LINE';
       img.style.maxWidth = '180px';
@@ -1907,6 +1947,10 @@
       return;
     }
     if (act.action === 'open_web') {
+      if (els.expenseReimbFilter) els.expenseReimbFilter.value = 'pending_reimbursement';
+      if (els.expenseMonthFilter) els.expenseMonthFilter.value = '';
+      if (els.expenseCategoryFilter) els.expenseCategoryFilter.value = '';
+      if (els.expenseTagFilter) els.expenseTagFilter.value = '';
       closeModal(els.lineSimModal);
       openModal(els.expenseModal);
       await loadExpensesLedger();
@@ -1916,7 +1960,8 @@
       showToast(`📞 จำลองโทรหาผู้ปกครอง${act.name ? ` (${act.name})` : ''}: ${act.phone}`, '📞');
       return;
     }
-    if (!act.data) return;
+    if (!act.data || state.lineSimBusy) return;
+    setLineSimBusy(true);
     if (btnEl && act.action !== 'run_cmd') btnEl.disabled = true;
     try {
       const fd = new FormData();
@@ -1931,12 +1976,15 @@
     } catch (err) {
       if (btnEl) btnEl.disabled = false;
       showToast(`ส่งคำสั่งไม่สำเร็จ: ${err.message}`, '❌');
+    } finally {
+      setLineSimBusy(false);
     }
   }
 
   async function sendLineSimText(text) {
     const clean = (text || '').trim();
-    if (!clean) return;
+    if (!clean || state.lineSimBusy) return;
+    setLineSimBusy(true);
     appendLineUserMessage(clean);
     try {
       const fd = new FormData();
@@ -1945,28 +1993,34 @@
       appendLineBotResponse(res);
     } catch (err) {
       appendLineBotResponse({ reply_text: `น้องโชคติดขัดนิดหน่อยครับคุณครู: ${err.message}` });
+    } finally {
+      setLineSimBusy(false);
     }
   }
 
   async function sendLineSimFile(file, label = '') {
-    if (!file) return;
+    if (!file || state.lineSimBusy) return;
+    setLineSimBusy(true);
     const isImg = (file.type || '').startsWith('image/');
-    const previewUrl = isImg ? URL.createObjectURL(file) : '';
+    const canCreateBlobUrl = isImg && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function';
+    const previewUrl = canCreateBlobUrl ? URL.createObjectURL(file) : '';
     appendLineUserMessage(label || `ส่งไฟล์: ${file.name}`, previewUrl);
     try {
       const fd = new FormData();
       fd.append('file', file);
       const res = await apiFetch('/api/line/simulate', { method: 'POST', body: fd });
-      if (previewUrl) URL.revokeObjectURL(previewUrl);
       appendLineBotResponse(res);
       if (res.ocr) renderDocumentResult(res.ocr);
       await loadSystemStats();
     } catch (err) {
       appendLineBotResponse({ reply_text: `น้องโชคอ่านไฟล์นี้ไม่สำเร็จครับ: ${err.message}` });
+    } finally {
+      setLineSimBusy(false);
     }
   }
 
   async function sendLineSimPreset(preset) {
+    if (state.lineSimBusy) return;
     const fname = PRESET_TO_FILE[preset];
     if (!fname) return;
     try {
@@ -2162,6 +2216,7 @@
     });
 
     els.btnOpenLineSim?.addEventListener('click', () => {
+      ensureLineWelcomeGreeting();
       openModal(els.lineSimModal);
       renderLineQuickReplies(DEFAULT_LINE_QUICK_REPLIES);
     });
