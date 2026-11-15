@@ -11,8 +11,12 @@
 - **คำที่ต้องหลีกเลี่ยง:** Record, Entry, Item
 
 ### **Source File** (ไฟล์ต้นฉบับ)
-- **ความหมาย:** ไฟล์รูปภาพหรือ PDF ต้นฉบับที่ไม่ถูกดัดแปลง ซึ่งบันทึกไว้ในดิสก์ที่ `data/uploads/` และผูกกับ `Vault Document` ผ่านคอลัมน์ `stored_filename`
+- **ความหมาย:** ไฟล์รูปภาพหรือ PDF ต้นฉบับที่ไม่ถูกดัดแปลง บันทึกไว้ในดิสก์ที่ `data/uploads/` (ในโหมด Local) หรือทั้งในแคชชั่วคราวและใน private Cloudflare R2 bucket ที่ `vault/uploads/<source_storage_key>` (ในโหมด Cloud ตาม ADR 0003) และผูกกับ `Vault Document` ผ่านคอลัมน์ `source_storage_key` และ `source_sha256` โดยดึงกลับมาแคชในเครื่องแบบ lazy เมื่อมีการดาวน์โหลด
 - **คำที่ต้องหลีกเลี่ยง:** Attachment, Raw Blob, Upload
+
+### **Vault Manifest & Snapshot Revision** (สารบัญ R2 และรุ่นสแนปช็อต)
+- **ความหมาย:** ไฟล์สารบัญกลาง `vault/manifest.json` ใน private Cloudflare R2 bucket ที่ชี้ไปยัง SQLite snapshot รุ่นล่าสุด (`rev-XXXXXXXX-*.db`) พร้อม `revision`, `schema_version`, `snapshot_sha256` และรายการ `retained_snapshots` (ใช้ `If-Match` / `If-None-Match: *` เป็นจุด commit ถาวรเพียงจุดเดียว)
+- **คำที่ต้องหลีกเลี่ยง:** Checkpoint File, Temp Backup
 
 ### **OCR Line** (บรรทัดข้อความ OCR)
 - **ความหมาย:** กล่องข้อความ 1 บรรทัดที่ได้จากโมเดล `LineOCR` (`model/runtime/line_engine.py`) ประกอบด้วยข้อความ (`text`), ค่าความเชื่อมั่น (`confidence`), ลำดับแถว (`row`), เลขหน้า (`page`), และพิกัดสี่เหลี่ยม 4 จุด (`box`)

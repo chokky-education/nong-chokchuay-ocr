@@ -130,6 +130,15 @@ class AppConfig:
     auth_session_ttl_seconds: int = DEFAULT_AUTH_SESSION_TTL_SECONDS
     allowed_line_user_ids: Tuple[str, ...] = ()
     line_allow_group_chats: bool = False
+    r2_gateway_url: str = ""
+    r2_required: bool = False
+    r2_bootstrap_if_empty: bool = False
+    internal_sync_token: str = ""
+    container_epoch: str = ""
+    snapshot_retention_count: int = 5
+
+    def is_r2_enabled(self) -> bool:
+        return bool((self.r2_gateway_url or "").strip() or self.r2_required)
 
     @classmethod
     def from_dir(cls, data_dir: str, **overrides: object) -> "AppConfig":
@@ -147,6 +156,8 @@ class AppConfig:
                     setattr(cfg, key, _parse_csv_tuple(value, lowercase=True))  # type: ignore[arg-type]
                 elif key == "allowed_line_user_ids":
                     setattr(cfg, key, _parse_csv_tuple(value, lowercase=False))  # type: ignore[arg-type]
+                elif key == "r2_gateway_url":
+                    setattr(cfg, key, str(value or "").strip().rstrip("/"))
                 elif key in {"llm_provider", "llm_model"}:
                     continue
                 else:
@@ -194,6 +205,17 @@ class AppConfig:
             if session_ttl <= 0:
                 raise ValueError("AUTH_SESSION_TTL_SECONDS must be positive.")
 
+        raw_retention = (os.environ.get("SNAPSHOT_RETENTION_COUNT") or "").strip()
+        if not raw_retention:
+            retention_count = 5
+        else:
+            try:
+                retention_count = int(raw_retention)
+            except ValueError as exc:
+                raise ValueError(f"Invalid SNAPSHOT_RETENTION_COUNT: {raw_retention!r}") from exc
+            if retention_count <= 0:
+                raise ValueError("SNAPSHOT_RETENTION_COUNT must be positive.")
+
         return cls.from_dir(
             data_dir=data_dir,
             inbox_poll_seconds=poll_seconds,
@@ -219,6 +241,20 @@ class AppConfig:
                 default=False,
                 field_name="LINE_ALLOW_GROUP_CHATS",
             ),
+            r2_gateway_url=(os.environ.get("R2_GATEWAY_URL") or "").strip().rstrip("/"),
+            r2_required=_parse_strict_bool(
+                os.environ.get("R2_REQUIRED"),
+                default=False,
+                field_name="R2_REQUIRED",
+            ),
+            r2_bootstrap_if_empty=_parse_strict_bool(
+                os.environ.get("R2_BOOTSTRAP_IF_EMPTY"),
+                default=False,
+                field_name="R2_BOOTSTRAP_IF_EMPTY",
+            ),
+            internal_sync_token=(os.environ.get("INTERNAL_SYNC_TOKEN") or "").strip(),
+            container_epoch=(os.environ.get("CONTAINER_EPOCH") or "").strip(),
+            snapshot_retention_count=retention_count,
         )
 
     def ensure_dirs(self) -> None:

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import sqlite3
@@ -12,8 +13,13 @@ UPLOADS_DIR = os.path.join(DB_DIR, "uploads")
 os.makedirs(DB_DIR, exist_ok=True)
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 
+SUPPORTED_SCHEMA_VERSION = 3
+MAX_SNAPSHOT_BYTES = 100 * 1024 * 1024
+
 _DOCUMENT_MIGRATION_COLUMNS = {
     "source_path": "TEXT DEFAULT ''",
+    "source_storage_key": "TEXT DEFAULT ''",
+    "source_sha256": "TEXT DEFAULT ''",
     "category": "TEXT DEFAULT 'general'",
     "tags_json": "TEXT DEFAULT '[]'",
     "ingestion_channel": "TEXT DEFAULT 'web_upload'",
@@ -152,6 +158,8 @@ def init_db(db_path: Optional[str] = None) -> None:
         duration_ms REAL DEFAULT 0.0,
         image_preview TEXT,
         source_path TEXT DEFAULT '',
+        source_storage_key TEXT DEFAULT '',
+        source_sha256 TEXT DEFAULT '',
         category TEXT DEFAULT 'general',
         tags_json TEXT DEFAULT '[]',
         ingestion_channel TEXT DEFAULT 'web_upload',
@@ -256,9 +264,70 @@ def init_db(db_path: Optional[str] = None) -> None:
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at)")
 
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS vault_operations (
+        operation_id TEXT PRIMARY KEY,
+        op_type TEXT NOT NULL,
+        target_id TEXT DEFAULT '',
+        result_json TEXT DEFAULT '{}',
+        revision INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL
+    );
+    """)
+
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS pending_r2_deletions (
+        storage_key TEXT PRIMARY KEY,
+        doc_id TEXT DEFAULT '',
+        deleted_in_revision INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    """)
+
+    conn.execute(f"PRAGMA user_version = {SUPPORTED_SCHEMA_VERSION}")
+
     conn.commit()
     conn.close()
     print("[DB] Database initialized at:", target_path)
+
+
+def has_any_vault_data(db_path: Optional[str] = None) -> bool:
+    """Return True if an existing SQLite file has user data or is a non-empty unreadable file."""
+    target_path = db_path or DB_PATH
+    if not os.path.exists(target_path):
+        return False
+    try:
+        if os.path.getsize(target_path) <= 0:
+            return False
+    except OSError:
+        return True
+
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = sqlite3.connect(target_path)
+        conn.execute("PRAGMA query_only = ON")
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()
+        if not integrity or integrity[0] != "ok":
+            return True
+        tables = [
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        ]
+        for table in tables:
+            lower = str(table).lower()
+            if lower.startswith("sqlite_") or lower.startswith("documents_fts"):
+                continue
+            row = conn.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone()
+            if row is not None:
+                return True
+        return False
+    except sqlite3.Error:
+        return True
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def save_document(
@@ -273,6 +342,8 @@ def save_document(
     file_size: int = 0,
     doc_id: Optional[str] = None,
     source_path: str = "",
+    source_storage_key: str = "",
+    source_sha256: str = "",
     category: str = "general",
     tags: Optional[Union[str, List[str]]] = None,
     ingestion_channel: str = "web_upload",
@@ -296,6 +367,10 @@ def save_document(
         if isinstance(review_status, str) and review_status.strip() in VALID_REVIEW_STATUSES
         else "pending_review"
     )
+    resolved_storage_key = (source_storage_key or "").strip() or (
+        os.path.basename(source_path) if source_path else ""
+    )
+    resolved_sha256 = (source_sha256 or "").strip().lower()
 
     conn = get_db_connection(db_path)
     cursor = conn.cursor()
@@ -305,10 +380,11 @@ def save_document(
         INSERT INTO documents (
             id, filename, file_type, file_size, total_pages,
             text_content, lines_json, avg_confidence, duration_ms,
-            image_preview, source_path, category, tags_json,
-            ingestion_channel, doc_date, image_width, image_height,
-            review_status, line_user_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            image_preview, source_path, source_storage_key, source_sha256,
+            category, tags_json, ingestion_channel, doc_date,
+            image_width, image_height, review_status, line_user_id,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             filename = excluded.filename,
             file_type = excluded.file_type,
@@ -320,6 +396,8 @@ def save_document(
             duration_ms = excluded.duration_ms,
             image_preview = excluded.image_preview,
             source_path = excluded.source_path,
+            source_storage_key = excluded.source_storage_key,
+            source_sha256 = excluded.source_sha256,
             category = excluded.category,
             tags_json = excluded.tags_json,
             ingestion_channel = excluded.ingestion_channel,
@@ -342,6 +420,8 @@ def save_document(
             duration_ms,
             image_preview,
             source_path,
+            resolved_storage_key,
+            resolved_sha256,
             clean_category,
             tags_json_str,
             ingestion_channel or "web_upload",
@@ -361,6 +441,24 @@ def save_document(
     return doc_id
 
 
+def _resolve_has_source_file(
+    src_path: str,
+    storage_key: str,
+    db_path: Optional[str],
+    r2_enabled: bool,
+) -> bool:
+    target_db = db_path or DB_PATH
+    uploads_dir = os.path.join(os.path.dirname(os.path.abspath(target_db)), "uploads")
+    local_key_path = os.path.join(uploads_dir, storage_key) if storage_key else ""
+    local_exists = bool(
+        (src_path and os.path.exists(src_path))
+        or (local_key_path and os.path.exists(local_key_path))
+    )
+    if r2_enabled:
+        return bool(storage_key or local_exists)
+    return local_exists
+
+
 def update_document_metadata(
     doc_id: str,
     text_content: Optional[str] = None,
@@ -369,6 +467,7 @@ def update_document_metadata(
     doc_date: Optional[str] = None,
     review_status: Optional[str] = None,
     db_path: Optional[str] = None,
+    r2_enabled: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Update editable document fields and synchronize FTS5."""
     conn = get_db_connection(db_path)
@@ -415,7 +514,7 @@ def update_document_metadata(
     _sync_fts_row(cursor, doc_id, row["filename"], new_category, new_tags, new_text or "")
     conn.commit()
     conn.close()
-    return get_document_by_id(doc_id, db_path=db_path)
+    return get_document_by_id(doc_id, db_path=db_path, r2_enabled=r2_enabled)
 
 
 def search_documents(
@@ -426,6 +525,7 @@ def search_documents(
     limit: int = 50,
     offset: int = 0,
     db_path: Optional[str] = None,
+    r2_enabled: bool = False,
 ) -> List[Dict[str, Any]]:
     conn = get_db_connection(db_path)
     cursor = conn.cursor()
@@ -449,7 +549,8 @@ def search_documents(
     select_cols = """
         d.id, d.filename, d.file_type, d.total_pages, d.avg_confidence,
         d.duration_ms, d.created_at, d.updated_at, d.image_preview,
-        d.source_path, d.category, d.tags_json, d.ingestion_channel, d.doc_date,
+        d.source_path, d.source_storage_key, d.source_sha256,
+        d.category, d.tags_json, d.ingestion_channel, d.doc_date,
         d.review_status, d.line_user_id,
         substr(d.text_content, 1, 300) as snippet,
         length(d.text_content) as char_count
@@ -505,7 +606,12 @@ def search_documents(
 
     results = []
     for r in rows:
+        row_keys = set(r.keys())
         src_path = r["source_path"] or ""
+        storage_key = (
+            (r["source_storage_key"] if "source_storage_key" in row_keys else "") or ""
+        ).strip() or (os.path.basename(src_path) if src_path else "")
+        source_sha256 = ((r["source_sha256"] if "source_sha256" in row_keys else "") or "").strip()
         results.append(
             {
                 "id": r["id"],
@@ -519,7 +625,9 @@ def search_documents(
                 "snippet": r["snippet"] or "",
                 "char_count": r["char_count"] or 0,
                 "has_image": bool(r["image_preview"]),
-                "has_source_file": bool(src_path and os.path.exists(src_path)),
+                "source_storage_key": storage_key,
+                "source_sha256": source_sha256,
+                "has_source_file": _resolve_has_source_file(src_path, storage_key, db_path, r2_enabled),
                 "category": r["category"] or "general",
                 "tags": _parse_tags_json(r["tags_json"]),
                 "ingestion_channel": r["ingestion_channel"] or "web_upload",
@@ -558,7 +666,11 @@ def _format_student_row(row: sqlite3.Row) -> Dict[str, Any]:
     }
 
 
-def get_document_by_id(doc_id: str, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def get_document_by_id(
+    doc_id: str,
+    db_path: Optional[str] = None,
+    r2_enabled: bool = False,
+) -> Optional[Dict[str, Any]]:
     conn = get_db_connection(db_path)
     try:
         cursor = conn.cursor()
@@ -573,14 +685,19 @@ def get_document_by_id(doc_id: str, db_path: Optional[str] = None) -> Optional[D
             except Exception:
                 lines = []
 
+        row_keys = set(row.keys())
         src_path = row["source_path"] or ""
+        storage_key = (
+            (row["source_storage_key"] if "source_storage_key" in row_keys else "") or ""
+        ).strip() or (os.path.basename(src_path) if src_path else "")
+        source_sha256 = ((row["source_sha256"] if "source_sha256" in row_keys else "") or "").strip()
+
         exp = cursor.execute("SELECT * FROM expenses WHERE document_id = ?", (doc_id,)).fetchone()
         expense_row = _format_expense_row(exp) if exp else None
 
         stu = cursor.execute("SELECT * FROM students WHERE document_id = ?", (doc_id,)).fetchone()
         student_row = _format_student_row(stu) if stu else None
 
-        row_keys = set(row.keys())
         return {
             "id": row["id"],
             "filename": row["filename"],
@@ -593,7 +710,9 @@ def get_document_by_id(doc_id: str, db_path: Optional[str] = None) -> Optional[D
             "duration_ms": row["duration_ms"],
             "image_preview": row["image_preview"],
             "source_path": src_path,
-            "has_source_file": bool(src_path and os.path.exists(src_path)),
+            "source_storage_key": storage_key,
+            "source_sha256": source_sha256,
+            "has_source_file": _resolve_has_source_file(src_path, storage_key, db_path, r2_enabled),
             "category": row["category"] or "general",
             "tags": _parse_tags_json(row["tags_json"]),
             "ingestion_channel": row["ingestion_channel"] or "web_upload",
@@ -1017,11 +1136,50 @@ def delete_student(student_id: str, db_path: Optional[str] = None) -> bool:
     return deleted
 
 
-def delete_document(doc_id: str, db_path: Optional[str] = None) -> bool:
+def delete_document(
+    doc_id: str,
+    db_path: Optional[str] = None,
+    *,
+    defer_file_removal: bool = False,
+    deleted_in_revision: int = 0,
+    removed_paths_out: Optional[List[str]] = None,
+) -> bool:
     conn = get_db_connection(db_path)
     cursor = conn.cursor()
-    row = cursor.execute("SELECT source_path FROM documents WHERE id = ?", (doc_id,)).fetchone()
-    src_path = row["source_path"] if row else ""
+    row = cursor.execute(
+        "SELECT source_path, source_storage_key FROM documents WHERE id = ?",
+        (doc_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return False
+
+    src_path = row["source_path"] or ""
+    row_keys = set(row.keys())
+    storage_key = (
+        (row["source_storage_key"] if "source_storage_key" in row_keys else "") or ""
+    ).strip() or (os.path.basename(src_path) if src_path else "")
+
+    target_db = db_path or DB_PATH
+    uploads_dir = os.path.join(os.path.dirname(os.path.abspath(target_db)), "uploads")
+    candidate_paths: List[str] = []
+    if src_path:
+        candidate_paths.append(src_path)
+    if storage_key:
+        key_path = os.path.join(uploads_dir, storage_key)
+        if key_path not in candidate_paths:
+            candidate_paths.append(key_path)
+
+    if defer_file_removal and storage_key:
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO pending_r2_deletions (
+                storage_key, doc_id, deleted_in_revision, created_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (storage_key, doc_id, int(deleted_in_revision), _utc_iso()),
+        )
+
     cursor.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
     try:
         cursor.execute("DELETE FROM documents_fts WHERE id = ?", (doc_id,))
@@ -1030,11 +1188,16 @@ def delete_document(doc_id: str, db_path: Optional[str] = None) -> bool:
     conn.commit()
     conn.close()
 
-    if src_path and os.path.exists(src_path):
-        try:
-            os.remove(src_path)
-        except OSError as exc:
-            print("[DB] Failed to remove source file:", exc)
+    if removed_paths_out is not None:
+        removed_paths_out.extend(candidate_paths)
+
+    if not defer_file_removal:
+        for path in candidate_paths:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError as exc:
+                    print("[DB] Failed to remove source file:", exc)
     return True
 
 
@@ -1214,3 +1377,229 @@ def revoke_auth_session(
     conn.commit()
     conn.close()
     return updated
+
+
+def record_vault_operation(
+    operation_id: str,
+    op_type: str,
+    target_id: str,
+    result_obj: Optional[Dict[str, Any]],
+    revision: int,
+    db_path: Optional[str] = None,
+    *,
+    payload_hash: str = "",
+) -> None:
+    """Persist an idempotency record for a completed vault mutation."""
+    clean_op_id = (operation_id or "").strip()
+    if not clean_op_id:
+        return
+    stored_obj = dict(result_obj or {})
+    clean_payload_hash = (payload_hash or "").strip().lower()
+    if clean_payload_hash:
+        stored_obj["_payload_hash"] = clean_payload_hash
+    conn = get_db_connection(db_path)
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO vault_operations (
+            operation_id, op_type, target_id, result_json, revision, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            clean_op_id,
+            (op_type or "").strip(),
+            (target_id or "").strip(),
+            json.dumps(stored_obj, ensure_ascii=False),
+            int(revision),
+            _utc_iso(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_vault_operation(
+    operation_id: str,
+    db_path: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Retrieve a previously committed idempotent operation result if recorded."""
+    clean_op_id = (operation_id or "").strip()
+    if not clean_op_id:
+        return None
+    conn = get_db_connection(db_path)
+    row = conn.execute(
+        """
+        SELECT operation_id, op_type, target_id, result_json, revision, created_at
+        FROM vault_operations
+        WHERE operation_id = ?
+        """,
+        (clean_op_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    parsed_result: Dict[str, Any] = {}
+    payload_hash = ""
+    if row["result_json"]:
+        try:
+            loaded = json.loads(row["result_json"])
+            if isinstance(loaded, dict):
+                payload_hash = str(loaded.pop("_payload_hash", "") or "").strip().lower()
+                parsed_result = loaded
+        except Exception:
+            parsed_result = {}
+    return {
+        "operation_id": row["operation_id"],
+        "op_type": row["op_type"],
+        "target_id": row["target_id"],
+        "result": parsed_result,
+        "payload_hash": payload_hash,
+        "revision": int(row["revision"] or 0),
+        "created_at": row["created_at"],
+    }
+
+
+def list_pending_r2_deletions(
+    max_revision: int,
+    db_path: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """List pending R2 source object deletions safe to purge once older snapshots expire."""
+    conn = get_db_connection(db_path)
+    rows = conn.execute(
+        """
+        SELECT storage_key, doc_id, deleted_in_revision, created_at
+        FROM pending_r2_deletions
+        WHERE deleted_in_revision <= ?
+        ORDER BY deleted_in_revision ASC, created_at ASC
+        """,
+        (int(max_revision),),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def remove_pending_r2_deletion(
+    storage_key: str,
+    db_path: Optional[str] = None,
+) -> None:
+    clean_key = (storage_key or "").strip()
+    if not clean_key:
+        return
+    conn = get_db_connection(db_path)
+    conn.execute("DELETE FROM pending_r2_deletions WHERE storage_key = ?", (clean_key,))
+    conn.commit()
+    conn.close()
+
+
+def remove_sqlite_sidecars(db_path: str) -> None:
+    """Remove SQLite journal/WAL/SHM sidecar files before replacing the main DB file."""
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = f"{db_path}{suffix}"
+        if os.path.exists(sidecar):
+            os.remove(sidecar)
+
+
+def _compute_file_sha256(path: str) -> tuple[int, str]:
+    hasher = hashlib.sha256()
+    size = 0
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(65536)
+            if not chunk:
+                break
+            size += len(chunk)
+            hasher.update(chunk)
+    return size, hasher.hexdigest()
+
+
+def export_db_snapshot(db_path: str, dest_path: str) -> Dict[str, Any]:
+    """Create a consistent standalone SQLite snapshot using sqlite3.Connection.backup()."""
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(f"Source database does not exist: {db_path}")
+    parent = os.path.dirname(os.path.abspath(dest_path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    if os.path.exists(dest_path):
+        os.remove(dest_path)
+    remove_sqlite_sidecars(dest_path)
+
+    src_conn: Optional[sqlite3.Connection] = None
+    dst_conn: Optional[sqlite3.Connection] = None
+    try:
+        src_conn = sqlite3.connect(db_path)
+        dst_conn = sqlite3.connect(dest_path)
+        src_conn.backup(dst_conn)
+        integrity = dst_conn.execute("PRAGMA integrity_check").fetchone()
+        if not integrity or integrity[0] != "ok":
+            raise ValueError(f"Snapshot integrity check failed: {integrity}")
+        fk_errors = dst_conn.execute("PRAGMA foreign_key_check").fetchall()
+        if fk_errors:
+            raise ValueError(f"Snapshot foreign key check failed ({len(fk_errors)} violations)")
+        version_row = dst_conn.execute("PRAGMA user_version").fetchone()
+        schema_version = int(version_row[0]) if version_row else SUPPORTED_SCHEMA_VERSION
+    finally:
+        if dst_conn is not None:
+            dst_conn.close()
+        if src_conn is not None:
+            src_conn.close()
+
+    remove_sqlite_sidecars(dest_path)
+    size, sha256_hex = _compute_file_sha256(dest_path)
+    if size <= 0 or size > MAX_SNAPSHOT_BYTES:
+        raise ValueError(f"Exported snapshot size out of bounds: {size}")
+    return {
+        "size": size,
+        "sha256": sha256_hex,
+        "schema_version": schema_version,
+    }
+
+
+def validate_sqlite_snapshot_file(
+    snapshot_path: str,
+    expected_size: Optional[int] = None,
+    expected_sha256: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Validate snapshot byte size, SHA-256, SQLite integrity, foreign keys, and schema version."""
+    if not os.path.isfile(snapshot_path):
+        raise ValueError("Snapshot file does not exist")
+
+    size, sha256_hex = _compute_file_sha256(snapshot_path)
+    if size <= 0 or size > MAX_SNAPSHOT_BYTES:
+        raise ValueError(f"Snapshot size invalid or exceeds limit: {size}")
+    if expected_size is not None and size != int(expected_size):
+        raise ValueError(f"Snapshot size mismatch: expected {expected_size}, got {size}")
+    if expected_sha256 is not None and sha256_hex != expected_sha256.strip().lower():
+        raise ValueError("Snapshot SHA-256 checksum mismatch")
+
+    ro_uri = f"file:{os.path.abspath(snapshot_path)}?mode=ro"
+    conn = sqlite3.connect(ro_uri, uri=True)
+    try:
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()
+        if not integrity or integrity[0] != "ok":
+            raise ValueError(f"SQLite integrity check failed: {integrity}")
+        fk_errors = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if fk_errors:
+            raise ValueError(f"SQLite foreign key check failed ({len(fk_errors)} violations)")
+        version_row = conn.execute("PRAGMA user_version").fetchone()
+        user_version = int(version_row[0]) if version_row else 0
+        if user_version > SUPPORTED_SCHEMA_VERSION:
+            raise ValueError(
+                f"Unsupported future schema version {user_version} > {SUPPORTED_SCHEMA_VERSION}"
+            )
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
+            ).fetchall()
+        }
+        required_tables = {"documents", "expenses", "students"}
+        missing = required_tables - tables
+        if missing:
+            raise ValueError(f"Snapshot missing required tables: {sorted(missing)}")
+    finally:
+        conn.close()
+
+    return {
+        "size": size,
+        "sha256": sha256_hex,
+        "user_version": user_version,
+    }

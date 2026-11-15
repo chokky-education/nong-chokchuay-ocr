@@ -11,8 +11,12 @@ An archived image or PDF stored in SQLite along with its OCR text, line bounding
 _Avoid_: Record, Entry, Item
 
 **Source File**:
-The original unmodified image or PDF file saved on disk inside `data/uploads/` and linked to a Vault Document.
+The original unmodified image or PDF file saved inside `data/uploads/` (and durably stored under private R2 `vault/uploads/<source_storage_key>` with SHA-256 verification when running in Cloudflare mode per ADR 0003), linked to a Vault Document and lazily restored on authorized download.
 _Avoid_: Attachment, Raw Blob, Upload
+
+**Vault Manifest & Snapshot Revision**:
+The authoritative `vault/manifest.json` pointer and versioned SQLite backup (`vault/snapshots/rev-*.db`) in the private R2 bucket (`nong-chokchuay-vault`), updated via conditional ETag (`If-Match` / `If-None-Match: *`) as the single durable commit point.
+_Avoid_: Checkpoint File, Temp Backup
 
 **OCR Line**:
 A single detected text region returned by `LineOCR`, containing recognized text, confidence score, reading-order row, page number, and 4-point box coordinates.

@@ -4,18 +4,22 @@
 
 name = "nong-chokchuay-ocr"
 main = "worker.js"
-compatibility_date = "2025-05-01"
+compatibility_date = "2025-11-17"
 workers_dev = true
 
 [[containers]]
 class_name = "NongChokChuayOCR"
 image = "./Dockerfile"
 instance_type = "basic"
-max_instances = 2
+max_instances = 1
 
 [[durable_objects.bindings]]
 name = "NONG_CHOK_CONTAINER"
 class_name = "NongChokChuayOCR"
+
+[[r2_buckets]]
+binding = "VAULT_BUCKET"
+bucket_name = "nong-chokchuay-vault"
 
 [[migrations]]
 tag = "v1"
@@ -27,6 +31,8 @@ AUTH_REQUIRED = "true"
 ALLOWED_EMAILS = "cgikchik07@gmail.com,ppksaruenee@gmail.com"
 LINE_ALLOW_GROUP_CHATS = "false"
 AUTO_EXTRACT_ON_INGEST = "true"
+R2_BOOTSTRAP_IF_EMPTY = "false"
+SNAPSHOT_RETENTION_COUNT = "5"
 PUBLIC_BASE_URL = "https://nong-chokchuay-ocr.entrace-space.workers.dev"
 LLM_PROVIDER = "gemini"
 LLM_MODEL = "gemini-4-hydrogen"

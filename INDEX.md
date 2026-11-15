@@ -13,11 +13,12 @@
   └── LINE OA Webhook    (line_service.py -> /api/line/webhook, /api/line/simulate)
             │
             ▼
-[ ตรรกะนำเข้ากลาง: ocr_service.py (VaultService) ]
-  ├── 1. บันทึกไฟล์ต้นฉบับ (Source File) ลง data/uploads/
-  ├── 2. รันโมเดล OpenThai 2.0 ONNX บน CPU (model/runtime/line_engine.py)
-  ├── 3. สกัดข้อมูลอัตโนมัติ (extractor.py: Offline Thai Regex + Optional Text-only LLM)
-  └── 4. บันทึกลง SQLite + FTS5 (database.py -> data/documents.db)
+[ ตรรกะนำเข้าและจัดเก็บถาวร: ocr_service.py + storage_service.py ]
+  ├── 1. เตรียมและสกัดข้อความ OpenThai 2.0 ONNX บน CPU (model/runtime/line_engine.py)
+  ├── 2. สกัดข้อมูลอัตโนมัติ (extractor.py: Offline Thai Regex + Optional Text-only LLM)
+  ├── 3. อัปโหลดไฟล์ต้นฉบับ (Local data/uploads/ และ/หรือ private R2 vault/uploads/)
+  ├── 4. บันทึก SQLite + FTS5 (database.py -> data/documents.db)
+  └── 5. เมื่อเปิด R2 (Cloud): ส่ง SQLite snapshot + commit vault/manifest.json แบบ conditional ETag ก่อนตอบสำเร็จ
             │
             ├──► ตาราง documents + documents_fts (คลังเอกสาร & Review Queue)
             ├──► ตาราง expenses                  (สมุดเบิกจ่ายคุณครู & งบโรงเรียน)
@@ -32,8 +33,9 @@
 | :--- | :--- | :--- |
 | `app.py` | FastAPI Web Server และ REST API ทั้งหมด (Auth Middleware, Google OAuth, OCR, Vault, Review Queue, Expenses, Students, Watcher, LINE Webhook/Simulator) | เรียกใช้ `auth_service`, `VaultService`, `VaultDatabase`, `InboxWatcher`, `LineService` |
 | `auth_service.py` | ระบบยืนยันตัวตน Google OAuth 2.0, ตรวจสิทธิ์ 2 อีเมล, Cookie session (HMAC-SHA256 + SQLite `auth_sessions`), และตรวจ Origin/CSRF | เชื่อม `app.py`, `database.py`, และ `config.py` |
-| `config.py` | โหลดค่าตั้งต้นจาก `.env` และ Environment Variables สร้างเป็น `AppConfig` (แบบ fail-closed สำหรับค่า Auth) | กำหนดพาธ `data/`, `AUTH_REQUIRED`, `ALLOWED_EMAILS`, Google OAuth, `ALLOWED_LINE_USER_IDS`, LLM และ `TEACHER_NAME` |
-| `database.py` | จัดการ SQLite (`data/documents.db`), FTS5 trigram index, CRUD และการทำ migration อัตโนมัติแบบรันซ้ำได้ (`PRAGMA table_info`) | ตาราง `documents`, `documents_fts`, `expenses`, `students`, `auth_sessions` และฟังก์ชันส่งออก CSV (UTF-8 BOM) |
+| `config.py` | โหลดค่าตั้งต้นจาก `.env` และ Environment Variables สร้างเป็น `AppConfig` (แบบ fail-closed สำหรับค่า Auth และตั้งค่า R2 Gateway) | กำหนดพาธ `data/`, `AUTH_REQUIRED`, `ALLOWED_EMAILS`, Google OAuth, `ALLOWED_LINE_USER_IDS`, `R2_GATEWAY_URL`, `R2_REQUIRED`, `R2_BOOTSTRAP_IF_EMPTY`, `SNAPSHOT_RETENTION_COUNT`, LLM และ `TEACHER_NAME` |
+| `database.py` | จัดการ SQLite (`data/documents.db`), FTS5 trigram index, CRUD และการทำ migration อัตโนมัติแบบรันซ้ำได้ (`PRAGMA user_version = 3`) | ตาราง `documents`, `documents_fts`, `expenses`, `students`, `auth_sessions`, `vault_operations`, `pending_r2_deletions`, ฟังก์ชัน snapshot/validate และส่งออก CSV (UTF-8 BOM) |
+| `storage_service.py` | จัดการการจัดเก็บถาวรบน Cloudflare R2 (`VaultStorageCoordinator`, `R2GatewayClient`): startup restore gate, lock, rollback, conditional ETag manifest commit และ lazy restore | เชื่อม `app.py`, `ocr_service.py`, `watcher.py`, `line_service.py`, `auth_service.py` เข้ากับ Worker `VaultR2Gateway` (`http://r2.internal`) |
 | `ocr_service.py` | ท่อประมวลผลกลาง (`VaultService`) สำหรับทุกช่องทางนำเข้า จัดการไฟล์ต้นฉบับ เรียก OCR และเชื่อมตัวสกัดข้อมูล | เชื่อม `LineOCR`, `VaultDatabase`, และ `extractor.py` |
 | `extractor.py` | สกัดข้อมูลใบเสร็จ/บิลเบิกจ่าย หมวดหมู่เอกสาร ป้ายกำกับอัตโนมัติ และข้อมูลทะเบียนเด็กอนุบาล | รองรับทั้งโหมด Offline Thai Regex (`regex`) และ Text-only LLM (`llm` ผ่าน Gemini หรือ OpenAI-compatible API) |
 | `line_service.py` | จัดการ LINE Messaging API Webhook, ตรวจ `X-Line-Signature`, ตรวจสิทธิ์ `ALLOWED_LINE_USER_IDS`/DM-only, แนบ `openExternalBrowser=1`, สร้าง Flex Card และจำลองแชท | เชื่อม `/api/line/webhook` และ `/api/line/simulate` เข้ากับ `VaultService` |
@@ -72,8 +74,8 @@
 | `start.sh` | สคริปต์รันเซิร์ฟเวอร์ในเครื่องที่ `http://127.0.0.1:8765` |
 | `requirements.txt` | รายการแพ็กเกจ Python ที่ต้องใช้ (FastAPI, Uvicorn, ONNX Runtime, OpenCV, PyMuPDF ฯลฯ) |
 | `Dockerfile` | สร้างอิมเมจ Python 3.11-slim พร้อมไลบรารีระบบและโมเดล ONNX สำหรับรันบนพอร์ต `8765` |
-| `worker.js` | Cloudflare Worker + Durable Object (`NongChokChuayOCR` แบบ `singleton`) บังคับ Auth/HTTPS header และคำนวณ `configFingerprint` รีสตาร์ต Container เมื่อ secret เปลี่ยน |
-| `wrangler.toml` | ค่าตั้งต้นสำหรับ Deploy ขึ้น Cloudflare Workers Paid ($5/เดือน) + Cloudflare Containers |
+| `worker.js` | Cloudflare Worker (`VaultR2Gateway` + Durable Object `NongChokChuayOCR` แบบ `singleton`) บังคับ Auth/HTTPS header, ยืนยัน internal sync token/epoch, คั่นคำขอ `http://r2.internal`, เช็ก `busy`/`RESTORING` ใน `alarm()`, และรีสตาร์ต Container เมื่อ secret เปลี่ยน |
+| `wrangler.toml` | ค่าตั้งต้นสำหรับ Deploy ขึ้น Cloudflare Workers Paid (ค่าพื้นฐาน $5/เดือน พร้อมโควตา) + Containers (`max_instances = 1`) + Private R2 Bucket (`VAULT_BUCKET` / `nong-chokchuay-vault`) |
 | `.github/workflows/deploy-cloudflare.yml` | GitHub Actions CI/CD สำหรับรันชุดทดสอบ Python + Node (`worker.js`, `static/app.js`) และสั่ง `npx wrangler deploy` เมื่อมี `CLOUDFLARE_API_TOKEN` |
 
 ---
@@ -88,7 +90,7 @@
 | `GLOSSARY.md`, `CONTEXT.md` | พจนานุกรมคำศัพท์โดเมนมาตรฐานของโปรเจกต์ |
 | `CODING_STANDARDS.md` | มาตรฐานการเขียนโค้ด การจัดการข้อมูล AI/ค่าลับ และเกณฑ์รีวิว diff |
 | `docs/release-workflow.md` | ขั้นตอนการเตรียมงาน รันตรวจ เปิด PR, CI, merge, deploy และตรวจระบบจริง |
-| `docs/adr/` | บันทึกการตัดสินใจทางสถาปัตยกรรม (`0001` และ `0002`) |
+| `docs/adr/` | บันทึกการตัดสินใจทางสถาปัตยกรรม (`0001`, `0002`, และ `0003`) |
 | `docs/agents/` | คำแนะนำเสริมสำหรับการใช้คำศัพท์โดเมน (`domain.md`) และระบบติดตามงานในเครื่อง (`issue-tracker.md`) |
 | `.scratch/` | บันทึกสเปกและรายการงานย่อยรายฟีเจอร์ในเครื่อง |
 
@@ -108,6 +110,7 @@
 | `tests/test_nong_chokchuay.py` | ทดสอบฟีเจอร์คุณครูอนุบาลครบวงจร (การเบิกจ่าย, ทะเบียนเด็กอนุบาล, ถาดรอตรวจ, LINE Webhook/Simulator) |
 | `tests/test_auth.py` | ทดสอบการยืนยันตัวตน Google OAuth, `auth_sessions`, CSRF/Origin, LINE sender allowlist และสัญญา UI |
 | `tests/test_frontend_auth.mjs` | ทดสอบการทำงานจริงของ `static/app.js` ใน Node VM (login gate, `X-CSRF-Token`, และการล้างข้อมูลเมื่อ session หมดอายุ/401) |
-| `tests/test_worker_js.mjs` | ทดสอบ `worker.js` (บังคับ `AUTH_REQUIRED="true"`, single DO `singleton`, `X-Forwarded-*` และ `configFingerprint`) |
+| `tests/test_r2_persistence.py` | ทดสอบการจัดเก็บถาวรบน R2 (restart recovery, LINE/Watch Folder commit gate, rollback, ETag 412 conflict, corrupt/future-schema gate, lazy restore และ retention GC) |
+| `tests/test_worker_js.mjs` | ทดสอบ `worker.js` (`VaultR2Gateway`, `VAULT_BUCKET`, `AUTH_REQUIRED="true"`, single DO `singleton`, header stripping และ `alarm()` `busy`/`RESTORING`) |
 | `samples/` | ภาพเอกสารตัวอย่างสำหรับกดทดลองใช้งานทันที |
 | `data/` | โฟลเดอร์เก็บข้อมูลจริงในเครื่อง (`documents.db`, `uploads/`, `inbox/`, `inbox_failed/`) — **ชุดทดสอบห้ามเขียนทับโฟลเดอร์นี้** |
