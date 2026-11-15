@@ -541,10 +541,10 @@
     <div class="modal-content line-sim-shell">
       <div class="line-sim-header">
         <div style="display: flex; align-items: center; gap: 0.65rem;">
-          <img src="/static/mascot.jpg" alt="น้องโชคช่วย LINE OA" class="line-avatar">
+          <img src="/static/mascot_cards/avatar.png" alt="น้องโชคช่วย LINE OA" class="line-avatar">
           <div>
             <div style="font-weight: 700; font-size: 1rem;">น้องโชคช่วย (LINE OA)</div>
-            <div style="font-size: 0.75rem; opacity: 0.85;">จำลองการส่งรูปบิล / เอกสารเด็ก / ค้นหาจากมือถือคุณครู</div>
+            <div style="font-size: 0.75rem; opacity: 0.85;">จำลองการส่งรูปบิล / เอกสารเด็ก / การ์ดมาสคอตจากมือถือคุณครู</div>
           </div>
         </div>
         <button id="btn-close-line-sim" class="btn btn-sm" style="background: rgba(255,255,255,0.2); color: white; border: none;">✕ ปิด</button>
@@ -552,19 +552,22 @@
 
       <div class="line-chat-messages" id="line-chat-messages">
         <div class="line-msg line-msg-bot">
-          <img src="/static/mascot.jpg" alt="น้องโชค" class="line-msg-avatar">
+          <img src="/static/mascot_cards/avatar.png" alt="น้องโชค" class="line-msg-avatar">
           <div class="line-bubble line-bubble-bot">
             สวัสดีครับครูพิ้งกี้! 🌤️ นี่คือแชท LINE OA ของน้องโชคช่วยครับ<br>
-            ครูพิ้งกี้ลองกดส่งรูปบิลจากร้านค้า พิมพ์ถามน้องโชค หรือกดปุ่มเมนูลัดด้านล่างได้เลยนะครับ
+            ครูพิ้งกี้ลองกดส่งรูปบิลจากร้านค้า กดปุ่มชิปลัด หรือเลือกจากเมนูด้านล่างได้เลยนะครับ
           </div>
         </div>
       </div>
+
+      <!-- LINE Quick Replies Strip -->
+      <div class="line-quick-replies-bar" id="line-quick-replies"></div>
 
       <!-- LINE Chat Composer -->
       <div class="line-composer">
         <button type="button" id="btn-line-sim-photo" class="btn btn-secondary btn-sm" title="ส่งรูปบิลหรือเอกสารเข้าแชท LINE">📎 ส่งรูป/PDF</button>
         <input type="file" id="line-sim-file-input" accept="image/*,application/pdf" style="display: none;">
-        <input type="text" id="line-sim-text-input" class="search-input" placeholder="พิมพ์ถึงน้องโชค (เช่น ยอดรอเบิก, แพ้อาหาร, ค้นหา สีเทียน)...">
+        <input type="text" id="line-sim-text-input" class="search-input" placeholder="พิมพ์ถึงน้องโชค (เช่น เมนู, รอตรวจ, ยอดรอเบิก, ค้นหา สีเทียน)...">
         <button type="button" id="btn-line-sim-send" class="btn btn-line btn-sm">ส่ง</button>
       </div>
 
@@ -578,13 +581,21 @@
           <span class="rm-icon">👶</span>
           <span>ส่งใบเด็กตัวอย่าง</span>
         </button>
+        <button type="button" class="rich-menu-btn" data-line-cmd="รอตรวจ">
+          <span class="rm-icon">📥</span>
+          <span>รายการรอตรวจ</span>
+        </button>
         <button type="button" class="rich-menu-btn" data-line-cmd="ยอดรอเบิก">
           <span class="rm-icon">💸</span>
-          <span>เช็กยอดรอเบิก</span>
+          <span>สรุปยอดรอเบิก</span>
         </button>
         <button type="button" class="rich-menu-btn" data-line-cmd="แพ้อาหาร">
           <span class="rm-icon">⚠️</span>
-          <span>เช็กเด็กแพ้อาหาร</span>
+          <span>เด็กแพ้อาหาร</span>
+        </button>
+        <button type="button" class="rich-menu-btn" data-line-cmd="เมนู">
+          <span class="rm-icon">📋</span>
+          <span>เมนูคำสั่งลัด</span>
         </button>
       </div>
     </div>

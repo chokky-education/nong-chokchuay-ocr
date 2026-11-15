@@ -409,6 +409,24 @@ main {
   background: var(--line-green-dark);
 }
 
+.btn-success {
+  background: var(--clover);
+  color: white;
+}
+.btn-success:hover:not(:disabled) {
+  background: #047857;
+}
+
+.btn-warning {
+  background: #fffbeb;
+  color: #b45309;
+  border-color: #fde68a;
+}
+.btn-warning:hover:not(:disabled) {
+  background: #fef3c7;
+  color: #92400e;
+}
+
 .btn-danger {
   background: #fef2f2;
   color: #b91c1c;
@@ -1335,8 +1353,8 @@ main {
   border-radius: 14px;
   overflow: hidden;
   box-shadow: 0 3px 10px rgba(0, 0, 0, 0.14);
-  min-width: 245px;
-  max-width: 310px;
+  min-width: 255px;
+  max-width: 330px;
 }
 
 .line-flex-head {
@@ -1365,6 +1383,483 @@ main {
   gap: 0.35rem;
 }
 
+/* Nong ChokChuay Mascot Cards (7 Scenarios) */
+.line-mascot-card {
+  --mc-bg: #eef2ff;
+  --mc-pill: #2563eb;
+  --mc-border: #dbeafe;
+  background: #ffffff;
+  border-radius: 18px;
+  border: 1.5px solid var(--mc-border);
+  overflow: hidden;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.14);
+  width: min(335px, 100%);
+  color: #1e293b;
+}
+
+.line-mascot-card.theme-receipt { --mc-bg: #ddf5eb; --mc-pill: #059669; --mc-border: #a7f3d0; }
+.line-mascot-card.theme-student { --mc-bg: #f4e5fa; --mc-pill: #7c3aed; --mc-border: #e9d5ff; }
+.line-mascot-card.theme-pending { --mc-bg: #dff0fc; --mc-pill: #0284c7; --mc-border: #bae6fd; }
+.line-mascot-card.theme-summary { --mc-bg: #fdf1ce; --mc-pill: #d97706; --mc-border: #fde68a; }
+.line-mascot-card.theme-allergy { --mc-bg: #fce3e5; --mc-pill: #e11d48; --mc-border: #fecdd3; }
+.line-mascot-card.theme-search { --mc-bg: #dbf4f5; --mc-pill: #0d9488; --mc-border: #99f6e4; }
+.line-mascot-card.theme-menu { --mc-bg: #ede5fa; --mc-pill: #6d28d9; --mc-border: #ddd6fe; }
+.line-mascot-card.theme-document { --mc-bg: #e0f2fe; --mc-pill: #0369a1; --mc-border: #bae6fd; }
+
+.mc-top-strip {
+  background: var(--mc-bg);
+  padding: 0.65rem 0.75rem 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.mc-header-pill {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  background: #ffffff;
+  border-radius: 999px;
+  padding: 0.3rem 0.65rem 0.3rem 0.35rem;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
+}
+
+.mc-step-num {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--mc-pill);
+  color: #ffffff;
+  font-size: 0.72rem;
+  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.mc-badge-title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #0f172a;
+  line-height: 1.25;
+}
+
+.mc-hero-img {
+  width: 100%;
+  max-height: 156px;
+  object-fit: contain;
+  display: block;
+  padding-bottom: 0.25rem;
+}
+
+.mc-body {
+  padding: 0.75rem 0.85rem;
+  background: #ffffff;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.mc-subhead {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.mc-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  font-size: 0.74rem;
+  color: #475569;
+}
+
+.mc-meta-chip {
+  background: #f1f5f9;
+  padding: 0.18rem 0.5rem;
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+/* Scenario 1: Receipt */
+.mc-receipt-total-box {
+  background: #f0fdf4;
+  border: 2px solid #86efac;
+  border-radius: 14px;
+  padding: 0.55rem 0.75rem;
+  text-align: center;
+}
+
+.mc-receipt-total-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #166534;
+}
+
+.mc-receipt-total-value {
+  font-size: 1.55rem;
+  font-weight: 800;
+  color: #047857;
+  line-height: 1.2;
+}
+
+/* Scenario 2: Student */
+.mc-allergy-box {
+  border-radius: 12px;
+  padding: 0.55rem 0.7rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.mc-allergy-box.is-alert {
+  background: #fff1f2;
+  border: 1.5px solid #fda4af;
+  color: #be123c;
+}
+
+.mc-allergy-box.is-safe {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  color: #475569;
+  font-weight: 600;
+}
+
+/* Scenario 3: Pending Review Carousel */
+.mc-pending-strip {
+  display: flex;
+  gap: 0.45rem;
+  overflow-x: auto;
+  padding-bottom: 0.25rem;
+}
+
+.mc-pending-mini {
+  flex: 0 0 112px;
+  border: 1.5px solid #cbd5e1;
+  border-radius: 12px;
+  padding: 0.5rem 0.45rem;
+  background: #f8fafc;
+  cursor: pointer;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  transition: border-color 0.15s, background 0.15s, transform 0.15s;
+}
+
+.mc-pending-mini.active {
+  border-color: #2563eb;
+  background: #eff6ff;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.2);
+  transform: translateY(-1px);
+}
+
+.mc-pending-mini-icon {
+  font-size: 1.15rem;
+}
+
+.mc-pending-mini-title {
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: #0f172a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mc-pending-mini-sub {
+  font-size: 0.68rem;
+  color: #2563eb;
+  font-weight: 700;
+}
+
+.mc-pending-mini-tag {
+  font-size: 0.64rem;
+  background: #dcfce7;
+  color: #166534;
+  border-radius: 999px;
+  padding: 0.1rem 0.35rem;
+  font-weight: 700;
+}
+
+/* Scenario 4: Expense Summary */
+.mc-kpi-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+
+.mc-kpi-box {
+  border-radius: 12px;
+  padding: 0.55rem 0.5rem;
+  text-align: center;
+  color: #ffffff;
+}
+
+.mc-kpi-box.is-pending {
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+}
+
+.mc-kpi-box.is-reimbursed {
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+}
+
+.mc-kpi-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  opacity: 0.95;
+}
+
+.mc-kpi-val {
+  font-size: 1.15rem;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.mc-kpi-cnt {
+  font-size: 0.68rem;
+  opacity: 0.9;
+}
+
+.mc-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: #475569;
+}
+
+.mc-progress-track {
+  flex: 1;
+  height: 9px;
+  background: #e2e8f0;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.mc-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #10b981 0%, #059669 100%);
+  border-radius: 999px;
+}
+
+/* Scenario 5: Allergy Watchlist Split */
+.mc-allergy-split {
+  display: grid;
+  grid-template-columns: 108px 1fr;
+  gap: 0.55rem;
+  align-items: stretch;
+}
+
+.mc-allergy-split-hero {
+  background: var(--mc-bg);
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.25rem;
+  overflow: hidden;
+}
+
+.mc-allergy-split-hero img {
+  width: 100%;
+  height: 100%;
+  max-height: 160px;
+  object-fit: contain;
+}
+
+.mc-allergy-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.mc-allergy-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  background: #fff1f2;
+  border: 1px solid #fecdd3;
+  border-radius: 10px;
+  padding: 0.35rem 0.5rem;
+}
+
+.mc-allergy-row-info {
+  min-width: 0;
+}
+
+.mc-allergy-row-name {
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.mc-allergy-row-warn {
+  font-size: 0.69rem;
+  font-weight: 600;
+  color: #be123c;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mc-call-dot {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #e11d48;
+  color: #ffffff;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.78rem;
+}
+
+/* Scenario 6: Search Carousel */
+.mc-search-pill {
+  background: #ffffff;
+  border: 1.5px solid #5eead4;
+  border-radius: 999px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #0f766e;
+}
+
+.mc-search-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 0.4rem;
+}
+
+.mc-search-item {
+  border: 1px solid #ccfbf1;
+  background: #f0fdfa;
+  border-radius: 11px;
+  padding: 0.45rem 0.4rem;
+  text-align: center;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  transition: transform 0.12s, box-shadow 0.12s;
+}
+
+.mc-search-item:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 8px rgba(13, 148, 136, 0.16);
+}
+
+.mc-search-item-title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #0f172a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mc-search-item-badge {
+  font-size: 0.64rem;
+  font-weight: 700;
+  background: #0d9488;
+  color: #ffffff;
+  border-radius: 999px;
+  padding: 0.12rem 0.35rem;
+}
+
+/* Scenario 7: Shortcut Menu */
+.mc-status-msg {
+  background: #f5f3ff;
+  border: 1px solid #ddd6fe;
+  border-radius: 10px;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.77rem;
+  color: #4c1d95;
+  font-weight: 600;
+  white-space: pre-line;
+}
+
+.mc-shortcut-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.38rem;
+}
+
+.mc-shortcut-btn {
+  border: none;
+  border-radius: 10px;
+  padding: 0.48rem 0.3rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #ffffff;
+  cursor: pointer;
+  text-align: center;
+}
+
+.mc-shortcut-btn.amber { background: #d97706; }
+.mc-shortcut-btn.rose { background: #e11d48; }
+.mc-shortcut-btn.blue { background: #2563eb; }
+
+/* Card Actions Row & Footer */
+.mc-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.mc-actions-row .btn {
+  flex: 1 1 44%;
+  justify-content: center;
+  font-size: 0.75rem;
+  padding: 0.44rem 0.55rem;
+}
+
+.mc-actions-row .btn-full {
+  flex: 1 1 100%;
+}
+
+/* LINE Quick Replies Bar */
+.line-quick-replies-bar {
+  background: #e2ecf9;
+  padding: 0.42rem 0.75rem;
+  display: flex;
+  gap: 0.4rem;
+  overflow-x: auto;
+  border-top: 1px solid #cbd5e1;
+}
+
+.line-quick-replies-bar:empty {
+  display: none;
+}
+
+.line-quick-chip {
+  flex: 0 0 auto;
+  background: #ffffff;
+  color: #059669;
+  border: 1.5px solid #06c755;
+  border-radius: 999px;
+  padding: 0.28rem 0.72rem;
+  font-size: 0.76rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.14s, color 0.14s;
+}
+
+.line-quick-chip:hover {
+  background: #06c755;
+  color: #ffffff;
+}
+
 .line-composer {
   padding: 0.6rem 0.75rem;
   background: #ffffff;
@@ -1374,9 +1869,19 @@ main {
   align-items: center;
 }
 
+.line-composer .btn {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.line-composer .search-input {
+  min-width: 0;
+  flex: 1;
+}
+
 .line-rich-menu {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   background: #f8fafc;
   border-top: 1px solid #cbd5e1;
 }
@@ -1384,8 +1889,9 @@ main {
 .rich-menu-btn {
   border: none;
   border-right: 1px solid #e2e8f0;
+  border-bottom: 1px solid #e2e8f0;
   background: transparent;
-  padding: 0.55rem 0.25rem;
+  padding: 0.52rem 0.25rem;
   cursor: pointer;
   display: flex;
   flex-direction: column;
@@ -1398,8 +1904,12 @@ main {
   transition: background 0.15s ease;
 }
 
-.rich-menu-btn:last-child {
+.rich-menu-btn:nth-child(3n) {
   border-right: none;
+}
+
+.rich-menu-btn:nth-child(n+4) {
+  border-bottom: none;
 }
 
 .rich-menu-btn:hover {
@@ -1409,6 +1919,37 @@ main {
 
 .rm-icon {
   font-size: 1.15rem;
+}
+
+@media (max-width: 640px) {
+  .line-sim-shell {
+    width: 100%;
+    max-width: 100%;
+    height: 92vh;
+    max-height: none;
+    border-radius: 16px 16px 0 0;
+  }
+
+  .line-chat-messages {
+    padding: 0.75rem;
+  }
+
+  .mc-hero-img {
+    max-height: 132px;
+  }
+
+  .mc-allergy-split {
+    grid-template-columns: 92px 1fr;
+  }
+
+  .rich-menu-btn {
+    padding: 0.42rem 0.2rem;
+    font-size: 0.67rem;
+  }
+
+  .rm-icon {
+    font-size: 1.02rem;
+  }
 }
 
 /* Auth Gate & User Pill (Sunny Sky & Golden Hour CI) */

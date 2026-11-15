@@ -78,6 +78,7 @@
     lineBoxes: [],
     pendingUploadKey: '',
     pendingUploadSignature: '',
+    lineSimBusy: false,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -225,6 +226,7 @@
     lineSimModal: $('line-sim-modal'),
     btnCloseLineSim: $('btn-close-line-sim'),
     lineChatMessages: $('line-chat-messages'),
+    lineQuickReplies: $('line-quick-replies'),
     btnLineSimPhoto: $('btn-line-sim-photo'),
     lineSimFileInput: $('line-sim-file-input'),
     lineSimTextInput: $('line-sim-text-input'),
@@ -372,6 +374,10 @@
     if (els.expensesTbody) els.expensesTbody.innerHTML = '';
     if (els.studentsList) els.studentsList.innerHTML = '';
     if (els.lineChatMessages) els.lineChatMessages.innerHTML = '';
+    if (els.lineQuickReplies) els.lineQuickReplies.innerHTML = '';
+    state.lineSimBusy = false;
+    if (els.btnLineSimSend) els.btnLineSimSend.disabled = false;
+    if (els.btnLineSimPhoto) els.btnLineSimPhoto.disabled = false;
 
     if (els.dbCountBadge) els.dbCountBadge.textContent = '0';
     if (els.inboxCountBadge) els.inboxCountBadge.textContent = '0';
@@ -1413,6 +1419,37 @@
     }
   }
 
+  function setLineSimBusy(busy) {
+    state.lineSimBusy = Boolean(busy);
+    if (els.btnLineSimSend) els.btnLineSimSend.disabled = state.lineSimBusy;
+    if (els.btnLineSimPhoto) els.btnLineSimPhoto.disabled = state.lineSimBusy;
+  }
+
+  function ensureLineWelcomeGreeting() {
+    if (!els.lineChatMessages) return;
+    const hasMessages = Array.isArray(els.lineChatMessages.children)
+      ? els.lineChatMessages.children.length > 0
+      : Boolean(els.lineChatMessages.innerHTML && els.lineChatMessages.innerHTML.trim());
+    if (hasMessages) return;
+
+    const row = document.createElement('div');
+    row.className = 'line-msg line-msg-bot';
+
+    const avatar = document.createElement('img');
+    avatar.src = '/static/mascot_cards/avatar.png';
+    avatar.alt = 'น้องโชค';
+    avatar.className = 'line-msg-avatar';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'line-bubble line-bubble-bot';
+    bubble.textContent =
+      'สวัสดีครับครูพิ้งกี้! 🌤️ นี่คือแชท LINE OA ของน้องโชคช่วยครับ\n' +
+      'ครูพิ้งกี้ลองกดส่งรูปบิลจากร้านค้า กดปุ่มชิปลัด หรือเลือกจากเมนูด้านล่างได้เลยนะครับ';
+
+    row.append(avatar, bubble);
+    els.lineChatMessages.appendChild(row);
+  }
+
   function appendLineUserMessage(text, imageUrl = '') {
     const row = document.createElement('div');
     row.className = 'line-msg line-msg-user';
@@ -1420,6 +1457,11 @@
     bubble.className = 'line-bubble line-bubble-user';
     if (imageUrl) {
       const img = document.createElement('img');
+      if (String(imageUrl).startsWith('blob:') && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+        const revokeBlob = () => URL.revokeObjectURL(imageUrl);
+        img.addEventListener('load', revokeBlob, { once: true });
+        img.addEventListener('error', revokeBlob, { once: true });
+      }
       img.src = imageUrl;
       img.alt = 'ภาพที่ส่งเข้า LINE';
       img.style.maxWidth = '180px';
@@ -1438,12 +1480,410 @@
     scrollLineChatBottom();
   }
 
+  const DEFAULT_LINE_QUICK_REPLIES = [
+    { label: '💸 ยอดรอเบิก', text: 'ยอดรอเบิก' },
+    { label: '⚠️ แพ้อาหาร', text: 'แพ้อาหาร' },
+    { label: '📥 รอตรวจ', text: 'รอตรวจ' },
+    { label: '📋 เมนู', text: 'เมนู' },
+  ];
+
+  function renderLineQuickReplies(items) {
+    if (!els.lineQuickReplies) return;
+    els.lineQuickReplies.innerHTML = '';
+    const list = Array.isArray(items) && items.length ? items : DEFAULT_LINE_QUICK_REPLIES;
+    list.forEach((qr) => {
+      if (!qr || !qr.label || !qr.text) return;
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'line-quick-chip';
+      chip.textContent = qr.label;
+      chip.addEventListener('click', () => sendLineSimText(qr.text));
+      els.lineQuickReplies.appendChild(chip);
+    });
+  }
+
+  function formatBahtNumber(val) {
+    return Number(val || 0).toLocaleString('th-TH', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  }
+
+  function createMascotCardHeader(cv, includeHero = true) {
+    const strip = document.createElement('div');
+    strip.className = 'mc-top-strip';
+
+    const pill = document.createElement('div');
+    pill.className = 'mc-header-pill';
+
+    const step = document.createElement('span');
+    step.className = 'mc-step-num';
+    step.textContent = cv.step_num || '✨';
+
+    const badge = document.createElement('span');
+    badge.className = 'mc-badge-title';
+    badge.textContent = cv.badge_title || 'น้องโชคช่วย';
+
+    pill.append(step, badge);
+    strip.appendChild(pill);
+
+    if (includeHero && cv.mascot_image) {
+      const hero = document.createElement('img');
+      hero.className = 'mc-hero-img';
+      hero.src = cv.mascot_image;
+      hero.alt = cv.badge_title || 'น้องโชคช่วย';
+      hero.loading = 'lazy';
+      strip.appendChild(hero);
+    }
+    return strip;
+  }
+
+  function createSimActionButton(act, extraClass = '') {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    let variant = 'btn-secondary';
+    if (act.action === 'confirm_review') variant = 'btn-success';
+    else if (act.action === 'mark_reimbursed') variant = 'btn-warning';
+    else if (act.action === 'call_parent') variant = 'btn-danger';
+    else if (act.action === 'run_cmd') variant = 'btn-primary';
+    btn.className = ['btn', 'btn-sm', variant, extraClass].filter(Boolean).join(' ');
+    btn.textContent = act.label;
+    btn.addEventListener('click', () => handleLineSimAction(act, btn));
+    return btn;
+  }
+
+  function buildMascotCard(cv, actions = []) {
+    const card = document.createElement('div');
+    card.className = `line-mascot-card theme-${cv.theme || 'document'}`;
+
+    const isSplitAllergy = cv.kind === 'allergy_watchlist';
+    card.appendChild(createMascotCardHeader(cv, !isSplitAllergy));
+
+    const body = document.createElement('div');
+    body.className = 'mc-body';
+
+    if (cv.kind === 'receipt') {
+      const totalBox = document.createElement('div');
+      totalBox.className = 'mc-receipt-total-box';
+      const lbl = document.createElement('div');
+      lbl.className = 'mc-receipt-total-label';
+      lbl.textContent = `ยอดรวม (${cv.merchant || 'ร้านค้า'})`;
+      const val = document.createElement('div');
+      val.className = 'mc-receipt-total-value';
+      val.textContent = `฿ ${Number(cv.total_amount || 0).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      totalBox.append(lbl, val);
+      body.appendChild(totalBox);
+
+      const meta = document.createElement('div');
+      meta.className = 'mc-meta-row';
+      [cv.category_label, cv.expense_date, cv.reimbursement_label].filter(Boolean).forEach((t) => {
+        const chip = document.createElement('span');
+        chip.className = 'mc-meta-chip';
+        chip.textContent = t;
+        meta.appendChild(chip);
+      });
+      body.appendChild(meta);
+
+      if (actions.length) {
+        const row = document.createElement('div');
+        row.className = 'mc-actions-row';
+        actions.forEach((act, idx) => {
+          row.appendChild(createSimActionButton(act, idx === actions.length - 1 && actions.length % 2 === 1 ? 'btn-full' : ''));
+        });
+        body.appendChild(row);
+      }
+    } else if (cv.kind === 'student') {
+      const sub = document.createElement('div');
+      sub.className = 'mc-subhead';
+      const nick = cv.nickname ? ` (${cv.nickname})` : '';
+      sub.textContent = `${cv.full_name || 'นักเรียนใหม่'}${nick} • ${cv.classroom || 'อนุบาล'}`;
+      body.appendChild(sub);
+
+      const alBox = document.createElement('div');
+      alBox.className = `mc-allergy-box ${cv.has_allergy ? 'is-alert' : 'is-safe'}`;
+      alBox.textContent = cv.has_allergy
+        ? `⚠️ แพ้อาหาร/ระวังพิเศษ: ${cv.warning_text}`
+        : '✅ ไม่มีประวัติแพ้อาหารที่ระบุไว้';
+      body.appendChild(alBox);
+
+      const phoneEl = document.createElement('div');
+      phoneEl.className = 'mc-meta-row';
+      phoneEl.textContent = `📞 ผู้ปกครอง: ${cv.parent_phone || '-'}`;
+      body.appendChild(phoneEl);
+
+      if (actions.length) {
+        const row = document.createElement('div');
+        row.className = 'mc-actions-row';
+        actions.forEach((act, idx) => {
+          row.appendChild(createSimActionButton(act, idx === actions.length - 1 && actions.length % 2 === 1 ? 'btn-full' : ''));
+        });
+        body.appendChild(row);
+      }
+    } else if (cv.kind === 'pending_carousel') {
+      const items = Array.isArray(cv.items) ? cv.items : [];
+      if (!items.length) {
+        const empty = document.createElement('div');
+        empty.className = 'mc-subhead';
+        empty.textContent = '🎉 ตรวจเอกสารครบทุกใบแล้วครับครูพิ้งกี้!';
+        body.appendChild(empty);
+      } else {
+        const sub = document.createElement('div');
+        sub.className = 'mc-subhead';
+        sub.textContent = `📥 ค้างตรวจ ${items.length} รายการ (แตะเลือกใบที่ต้องการ)`;
+        body.appendChild(sub);
+
+        const strip = document.createElement('div');
+        strip.className = 'mc-pending-strip';
+
+        const confirmBtn = document.createElement('button');
+        confirmBtn.type = 'button';
+        confirmBtn.className = 'btn btn-primary btn-sm btn-full';
+
+        const openBtn = document.createElement('button');
+        openBtn.type = 'button';
+        openBtn.className = 'btn btn-secondary btn-sm btn-full';
+        openBtn.textContent = '💻 เปิดใบที่เลือกบนโต๊ะทำงาน';
+
+        let selectedItem = items[0];
+        const updateSelected = (item, miniNodes) => {
+          selectedItem = item;
+          miniNodes.forEach((n, i) => n.classList.toggle('active', items[i].doc_id === item.doc_id));
+          confirmBtn.textContent = `✅ ยืนยันใบที่ #${item.index} (${item.title.slice(0, 14)})`;
+        };
+
+        const miniNodes = items.map((it) => {
+          const mini = document.createElement('div');
+          mini.className = 'mc-pending-mini';
+          const ic = document.createElement('div');
+          ic.className = 'mc-pending-mini-icon';
+          ic.textContent = it.icon || '📄';
+          const tt = document.createElement('div');
+          tt.className = 'mc-pending-mini-title';
+          tt.textContent = it.title;
+          const sb = document.createElement('div');
+          sb.className = 'mc-pending-mini-sub';
+          sb.textContent = it.subtitle;
+          const tg = document.createElement('div');
+          tg.className = 'mc-pending-mini-tag';
+          tg.textContent = `#${it.index}`;
+          mini.append(ic, tt, sb, tg);
+          mini.addEventListener('click', () => updateSelected(it, miniNodes));
+          strip.appendChild(mini);
+          return mini;
+        });
+
+        updateSelected(items[0], miniNodes);
+        confirmBtn.addEventListener('click', () => {
+          if (!selectedItem) return;
+          handleLineSimAction(
+            { action: 'confirm_review', doc_id: selectedItem.doc_id, data: selectedItem.confirm_data },
+            confirmBtn
+          );
+        });
+        openBtn.addEventListener('click', () => {
+          if (selectedItem?.doc_id) openDocumentById(selectedItem.doc_id);
+        });
+
+        body.appendChild(strip);
+        const actRow = document.createElement('div');
+        actRow.className = 'mc-actions-row';
+        actRow.append(confirmBtn, openBtn);
+        body.appendChild(actRow);
+      }
+    } else if (cv.kind === 'expense_summary') {
+      const grid = document.createElement('div');
+      grid.className = 'mc-kpi-grid';
+
+      const pendingBox = document.createElement('div');
+      pendingBox.className = 'mc-kpi-box is-pending';
+      const pLbl = document.createElement('div');
+      pLbl.className = 'mc-kpi-label';
+      pLbl.textContent = '⏳ รอเบิกคืน';
+      const pVal = document.createElement('div');
+      pVal.className = 'mc-kpi-val';
+      pVal.textContent = `${formatBahtNumber(cv.pending_total)} ฿`;
+      const pCnt = document.createElement('div');
+      pCnt.className = 'mc-kpi-cnt';
+      pCnt.textContent = `${cv.pending_count || 0} ใบ`;
+      pendingBox.append(pLbl, pVal, pCnt);
+
+      const reimbBox = document.createElement('div');
+      reimbBox.className = 'mc-kpi-box is-reimbursed';
+      const rLbl = document.createElement('div');
+      rLbl.className = 'mc-kpi-label';
+      rLbl.textContent = '✓ เบิกคืนแล้ว';
+      const rVal = document.createElement('div');
+      rVal.className = 'mc-kpi-val';
+      rVal.textContent = `${formatBahtNumber(cv.reimbursed_total)} ฿`;
+      const rCnt = document.createElement('div');
+      rCnt.className = 'mc-kpi-cnt';
+      rCnt.textContent = `${cv.reimbursed_count || 0} ใบ`;
+      reimbBox.append(rLbl, rVal, rCnt);
+
+      grid.append(pendingBox, reimbBox);
+      body.appendChild(grid);
+
+      const progRow = document.createElement('div');
+      progRow.className = 'mc-progress-row';
+      const track = document.createElement('div');
+      track.className = 'mc-progress-track';
+      const fill = document.createElement('div');
+      fill.className = 'mc-progress-fill';
+      fill.style.width = `${Math.min(100, Math.max(0, Number(cv.reimbursed_pct || 0)))}%`;
+      track.appendChild(fill);
+      const pctTxt = document.createElement('span');
+      pctTxt.textContent = `${cv.reimbursed_pct || 0}%`;
+      progRow.append(track, pctTxt);
+      body.appendChild(progRow);
+
+      if (actions.length) {
+        const row = document.createElement('div');
+        row.className = 'mc-actions-row';
+        actions.forEach((act) => row.appendChild(createSimActionButton(act, 'btn-full')));
+        body.appendChild(row);
+      }
+    } else if (cv.kind === 'allergy_watchlist') {
+      const split = document.createElement('div');
+      split.className = 'mc-allergy-split';
+
+      const heroBox = document.createElement('div');
+      heroBox.className = 'mc-allergy-split-hero';
+      const heroImg = document.createElement('img');
+      heroImg.src = cv.mascot_image;
+      heroImg.alt = 'แพ้อาหารหน้าห้องเรียน';
+      heroBox.appendChild(heroImg);
+
+      const listCol = document.createElement('div');
+      listCol.className = 'mc-allergy-list';
+      const stus = Array.isArray(cv.students) ? cv.students : [];
+      if (!stus.length) {
+        const none = document.createElement('div');
+        none.className = 'mc-subhead';
+        none.textContent = 'ยังไม่มีรายชื่อเด็กในแฟ้มครับ';
+        listCol.appendChild(none);
+      } else {
+        stus.forEach((st) => {
+          const r = document.createElement('div');
+          r.className = 'mc-allergy-row';
+          const info = document.createElement('div');
+          info.className = 'mc-allergy-row-info';
+          const nm = document.createElement('div');
+          nm.className = 'mc-allergy-row-name';
+          nm.textContent = `${st.name} (${st.classroom})`;
+          const wn = document.createElement('div');
+          wn.className = 'mc-allergy-row-warn';
+          wn.textContent = `⚠️ ${st.warning}`;
+          info.append(nm, wn);
+          r.appendChild(info);
+
+          if (st.parent_phone && st.parent_phone !== '-') {
+            const callBtn = document.createElement('button');
+            callBtn.type = 'button';
+            callBtn.className = 'mc-call-dot';
+            callBtn.title = `โทรหาผู้ปกครอง ${st.name}: ${st.parent_phone}`;
+            callBtn.textContent = '📞';
+            callBtn.addEventListener('click', () =>
+              handleLineSimAction({ action: 'call_parent', phone: st.parent_phone, name: st.name })
+            );
+            r.appendChild(callBtn);
+          }
+          listCol.appendChild(r);
+        });
+      }
+
+      split.append(heroBox, listCol);
+      body.appendChild(split);
+
+      if (actions.length) {
+        const row = document.createElement('div');
+        row.className = 'mc-actions-row';
+        actions.forEach((act) => row.appendChild(createSimActionButton(act, 'btn-full')));
+        body.appendChild(row);
+      }
+    } else if (cv.kind === 'search_carousel') {
+      const pill = document.createElement('div');
+      pill.className = 'mc-search-pill';
+      pill.textContent = `🔍 "${cv.query || ''}"`;
+      body.appendChild(pill);
+
+      const items = Array.isArray(cv.items) ? cv.items : [];
+      if (!items.length) {
+        const empty = document.createElement('div');
+        empty.className = 'mc-meta-row';
+        empty.textContent = 'ยังไม่พบข้อมูลที่ตรงกับคำค้นนี้ในตู้เซฟครับ';
+        body.appendChild(empty);
+      } else {
+        const grid = document.createElement('div');
+        grid.className = 'mc-search-grid';
+        items.forEach((it) => {
+          const box = document.createElement('div');
+          box.className = 'mc-search-item';
+          const ic = document.createElement('div');
+          ic.textContent = it.icon || '📄';
+          const tt = document.createElement('div');
+          tt.className = 'mc-search-item-title';
+          tt.textContent = it.title;
+          const bg = document.createElement('div');
+          bg.className = 'mc-search-item-badge';
+          bg.textContent = it.badge || 'เปิดดู →';
+          box.append(ic, tt, bg);
+          box.addEventListener('click', () => {
+            if (it.doc_id) openDocumentById(it.doc_id);
+            else if (it.cmd) sendLineSimText(it.cmd);
+          });
+          grid.appendChild(box);
+        });
+        body.appendChild(grid);
+      }
+    } else if (cv.kind === 'menu') {
+      if (cv.status_message) {
+        const st = document.createElement('div');
+        st.className = 'mc-status-msg';
+        st.textContent = cv.status_message;
+        body.appendChild(st);
+      } else {
+        const sub = document.createElement('div');
+        sub.className = 'mc-subhead';
+        sub.textContent = 'เลือกคำสั่งด่วน หรือส่งรูปบิล/ใบสมัครเข้าแชทได้เลยครับ';
+        body.appendChild(sub);
+      }
+      const scGrid = document.createElement('div');
+      scGrid.className = 'mc-shortcut-grid';
+      (cv.shortcuts || []).forEach((sc) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = `mc-shortcut-btn ${sc.color || 'blue'}`;
+        b.textContent = sc.label;
+        b.addEventListener('click', () => sendLineSimText(sc.cmd));
+        scGrid.appendChild(b);
+      });
+      body.appendChild(scGrid);
+    } else {
+      const sub = document.createElement('div');
+      sub.className = 'mc-subhead';
+      sub.textContent = cv.filename || 'บันทึกเอกสารเรียบร้อย';
+      body.appendChild(sub);
+      if (cv.snippet) {
+        const sn = document.createElement('div');
+        sn.className = 'mc-meta-row';
+        sn.textContent = cv.snippet;
+        body.appendChild(sn);
+      }
+      if (actions.length) {
+        const row = document.createElement('div');
+        row.className = 'mc-actions-row';
+        actions.forEach((act) => row.appendChild(createSimActionButton(act, 'btn-full')));
+        body.appendChild(row);
+      }
+    }
+
+    card.appendChild(body);
+    return card;
+  }
+
   function appendLineBotResponse(res) {
     const row = document.createElement('div');
     row.className = 'line-msg line-msg-bot';
 
     const avatar = document.createElement('img');
-    avatar.src = '/static/mascot.jpg';
+    avatar.src = '/static/mascot_cards/avatar.png';
     avatar.alt = 'น้องโชค';
     avatar.className = 'line-msg-avatar';
     row.appendChild(avatar);
@@ -1452,8 +1892,11 @@
     col.style.display = 'flex';
     col.style.flexDirection = 'column';
     col.style.gap = '0.45rem';
+    col.style.maxWidth = '86%';
 
-    if (res.flex_message && res.flex_message.contents) {
+    if (res.card_view) {
+      col.appendChild(buildMascotCard(res.card_view, res.actions || []));
+    } else if (res.flex_message && res.flex_message.contents) {
       const contents = res.flex_message.contents;
       const headText = contents.header?.contents?.[0]?.text || 'น้องโชคช่วยสรุปให้ครับ';
       const bodyLines = (contents.body?.contents || []).map((c) => c.text).filter(Boolean);
@@ -1479,12 +1922,7 @@
         const footerEl = document.createElement('div');
         footerEl.className = 'line-flex-footer';
         res.actions.forEach((act) => {
-          const btn = document.createElement('button');
-          btn.type = 'button';
-          btn.className = `btn btn-sm ${act.action === 'confirm_review' ? 'btn-primary' : 'btn-secondary'}`;
-          btn.textContent = act.label;
-          btn.addEventListener('click', () => handleLineSimAction(act, btn));
-          footerEl.appendChild(btn);
+          footerEl.appendChild(createSimActionButton(act));
         });
         card.appendChild(footerEl);
       }
@@ -1499,6 +1937,7 @@
 
     row.appendChild(col);
     els.lineChatMessages.appendChild(row);
+    renderLineQuickReplies(res.quick_replies);
     scrollLineChatBottom();
   }
 
@@ -1507,8 +1946,23 @@
       await openDocumentById(act.doc_id);
       return;
     }
-    if (!act.data) return;
-    if (btnEl) btnEl.disabled = true;
+    if (act.action === 'open_web') {
+      if (els.expenseReimbFilter) els.expenseReimbFilter.value = 'pending_reimbursement';
+      if (els.expenseMonthFilter) els.expenseMonthFilter.value = '';
+      if (els.expenseCategoryFilter) els.expenseCategoryFilter.value = '';
+      if (els.expenseTagFilter) els.expenseTagFilter.value = '';
+      closeModal(els.lineSimModal);
+      openModal(els.expenseModal);
+      await loadExpensesLedger();
+      return;
+    }
+    if (act.action === 'call_parent' && act.phone) {
+      showToast(`📞 จำลองโทรหาผู้ปกครอง${act.name ? ` (${act.name})` : ''}: ${act.phone}`, '📞');
+      return;
+    }
+    if (!act.data || state.lineSimBusy) return;
+    setLineSimBusy(true);
+    if (btnEl && act.action !== 'run_cmd') btnEl.disabled = true;
     try {
       const fd = new FormData();
       fd.append('postback_data', act.data);
@@ -1520,13 +1974,17 @@
         renderDocumentResult(docRes.document);
       }
     } catch (err) {
+      if (btnEl) btnEl.disabled = false;
       showToast(`ส่งคำสั่งไม่สำเร็จ: ${err.message}`, '❌');
+    } finally {
+      setLineSimBusy(false);
     }
   }
 
   async function sendLineSimText(text) {
     const clean = (text || '').trim();
-    if (!clean) return;
+    if (!clean || state.lineSimBusy) return;
+    setLineSimBusy(true);
     appendLineUserMessage(clean);
     try {
       const fd = new FormData();
@@ -1535,28 +1993,34 @@
       appendLineBotResponse(res);
     } catch (err) {
       appendLineBotResponse({ reply_text: `น้องโชคติดขัดนิดหน่อยครับคุณครู: ${err.message}` });
+    } finally {
+      setLineSimBusy(false);
     }
   }
 
   async function sendLineSimFile(file, label = '') {
-    if (!file) return;
+    if (!file || state.lineSimBusy) return;
+    setLineSimBusy(true);
     const isImg = (file.type || '').startsWith('image/');
-    const previewUrl = isImg ? URL.createObjectURL(file) : '';
+    const canCreateBlobUrl = isImg && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function';
+    const previewUrl = canCreateBlobUrl ? URL.createObjectURL(file) : '';
     appendLineUserMessage(label || `ส่งไฟล์: ${file.name}`, previewUrl);
     try {
       const fd = new FormData();
       fd.append('file', file);
       const res = await apiFetch('/api/line/simulate', { method: 'POST', body: fd });
-      if (previewUrl) URL.revokeObjectURL(previewUrl);
       appendLineBotResponse(res);
       if (res.ocr) renderDocumentResult(res.ocr);
       await loadSystemStats();
     } catch (err) {
       appendLineBotResponse({ reply_text: `น้องโชคอ่านไฟล์นี้ไม่สำเร็จครับ: ${err.message}` });
+    } finally {
+      setLineSimBusy(false);
     }
   }
 
   async function sendLineSimPreset(preset) {
+    if (state.lineSimBusy) return;
     const fname = PRESET_TO_FILE[preset];
     if (!fname) return;
     try {
@@ -1751,7 +2215,11 @@
       loadStudentsRoster();
     });
 
-    els.btnOpenLineSim?.addEventListener('click', () => openModal(els.lineSimModal));
+    els.btnOpenLineSim?.addEventListener('click', () => {
+      ensureLineWelcomeGreeting();
+      openModal(els.lineSimModal);
+      renderLineQuickReplies(DEFAULT_LINE_QUICK_REPLIES);
+    });
 
     // Close Modal Buttons & Backdrops
     [

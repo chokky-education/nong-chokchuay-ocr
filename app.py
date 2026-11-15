@@ -1004,13 +1004,27 @@ def create_app(
                 msg = event.get("message") or {}
                 mtype = msg.get("type")
                 if mtype == "text":
-                    reply_obj = line_service.process_line_text_command(
-                        msg.get("text", ""),
-                        db_path=cfg.db_path,
-                        public_base_url=cfg.public_base_url,
-                        config=cfg,
-                        teacher_name=cfg.teacher_name,
-                    )
+                    try:
+                        reply_obj = line_service.process_line_text_command(
+                            msg.get("text", ""),
+                            db_path=cfg.db_path,
+                            public_base_url=cfg.public_base_url,
+                            config=cfg,
+                            teacher_name=cfg.teacher_name,
+                            storage=storage,
+                        )
+                    except storage_service.StorageError as exc:
+                        storage_failed = True
+                        reply_text = (
+                            f"ขออภัยครับ{cfg.teacher_name} ระบบจัดเก็บข้อมูลขัดข้องชั่วคราว "
+                            "จึงยังไม่สามารถดึงข้อมูลในตอนนี้ได้ครับ กรุณาลองใหม่อีกครั้งนะครับ"
+                        )
+                        reply_obj = {
+                            "success": False,
+                            "error": exc.error_code,
+                            "reply_text": reply_text,
+                            "line_messages": [{"type": "text", "text": reply_text}],
+                        }
                 elif mtype in ("image", "file"):
                     msg_id = msg.get("id", "")
                     op_id = f"line:msg:{event_uid or msg_id}" if (event_uid or msg_id) else ""
@@ -1086,6 +1100,7 @@ def create_app(
                         db_path=cfg.db_path,
                         config=cfg,
                         teacher_name=cfg.teacher_name,
+                        public_base_url=cfg.public_base_url,
                         storage=storage,
                         operation_id=pb_op_id,
                     )
@@ -1150,6 +1165,7 @@ def create_app(
                 db_path=cfg.db_path,
                 config=cfg,
                 teacher_name=cfg.teacher_name,
+                public_base_url=cfg.public_base_url,
                 storage=storage,
                 operation_id=op_id,
             )
@@ -1193,6 +1209,7 @@ def create_app(
             public_base_url=cfg.public_base_url,
             config=cfg,
             teacher_name=cfg.teacher_name,
+            storage=storage,
         )
         return JSONResponse({"success": True, "mode": "text", **res})
 
