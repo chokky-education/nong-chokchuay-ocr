@@ -8,6 +8,7 @@
 - แก้การสร้างบิลใหม่ด้วย `PUT /api/expenses/{doc_id}` ให้ใช้ default ของ Vault เมื่อไม่ส่งสถานะ โดย explicit status และสถานะเดิมมีสิทธิ์ก่อน และยังรักษากฎป้ายส่วนตัว
 - เพิ่ม regression tests ทั้งสองกรณี (Python + Node VM) ส่วนหลักฐาน 72/16 ข้อด้านล่างเป็นรอบ PR #9 เดิม
 - รอบแก้ก่อน release: syntax ผ่าน, Python **73 ข้อ** และ Node **17 ข้อ** ผ่าน, `git diff --check` และ Wrangler 4.114.0 dry run ผ่าน
+- หลัง deploy รุ่นแก้จาก PR #10 พบว่า Chrome ยังใช้ app.js รุ่นเก่าจาก cache แม้ raw HTTP ได้ byte ตรงกับ checkout จึงเพิ่ม content hash ใน URL ของ JS/CSS และ `Cache-Control: no-cache` สำหรับ index พร้อมทดสอบว่าเปลี่ยนเนื้อหาแล้ว URL เปลี่ยน และไฟล์ที่มี query ยังเข้าถึงได้ตามสิทธิ์เดิม
 
 ## ผลตรวจ
 

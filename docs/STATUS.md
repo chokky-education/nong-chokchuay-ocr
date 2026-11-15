@@ -1,6 +1,6 @@
 # STATUS.md — สถานะงานปัจจุบัน งานค้าง และข้อจำกัดของระบบ
 
-> [PR #9](https://github.com/chokky-education/nong-chokchuay-ocr/pull/9) merge แล้วที่ `0f9410dcde6cfd431778ad551c677062684ed9a0` เจ้าของอนุมัติ merge/deploy แล้ว กำลังเตรียม PR แก้สองจุดจากรีวิวก่อน deploy และติดตั้ง Rich Menu บน OA จริง
+> PR #9 และ [PR #10](https://github.com/chokky-education/nong-chokchuay-ocr/pull/10) merge แล้ว Deploy รุ่น `3e9e132b88d0415eb3b81e1327ce70b631a3a8a4` สำเร็จ แต่การตรวจจริงพบ Chrome ใช้ JavaScript ที่ cache ไว้ กำลังเพิ่ม URL ตาม hash ของไฟล์ก่อนเปิดใช้ Rich Menu บน OA จริง
 
 อัปเดตล่าสุด: 2026-11-15
 
