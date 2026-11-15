@@ -382,6 +382,104 @@ class NongChokChuayTests(unittest.TestCase):
         self.assertEqual(mascot_res.status_code, 200)
         self.assertTrue(len(mascot_res.content) > 1000)
 
+    def test_natural_data_questions_return_cards_with_and_without_llm(self):
+        self.fake_ocr.default_text = "ใบเสร็จรับเงิน\nร้านเครื่องเขียน\nยอดสุทธิ 125.50 บาท"
+        receipt = self.client.post(
+            "/api/ocr", files={"file": ("bill.png", make_png_bytes(), "image/png")}
+        )
+        self.assertEqual(receipt.status_code, 200)
+        student = self.client.post("/api/students", json={
+            "full_name": "เด็กหญิงมะลิ ใจดี", "nickname": "มะลิ", "allergies": "แพ้นมวัว",
+        })
+        self.assertEqual(student.status_code, 200)
+        cases = [
+            ("มียอดรอเบิกเท่าไหร่", "reimbursement_summary", "expense_summary"),
+            ("ตอนนี้มีเงินรอเบิกคืนกี่บาทครับ?", "reimbursement_summary", "expense_summary"),
+            ("ช่วยสรุปยอดรอเบิกให้หน่อยค่ะ", "reimbursement_summary", "expense_summary"),
+            ("ขอดูค่าใช้จ่ายหน่อย", "reimbursement_summary", "expense_summary"),
+            ("ใครแพ้อาหารบ้าง", "student_allergy_summary", "allergy_watchlist"),
+            ("มีเด็กแพ้อาหารกี่คนคะ", "student_allergy_summary", "allergy_watchlist"),
+            ("ขอดูรายชื่อเด็กที่แพ้อาหารหน่อยครับ", "student_allergy_summary", "allergy_watchlist"),
+            ("  ใคร แพ้อาหาร บ้าง คะ？  ", "student_allergy_summary", "allergy_watchlist"),
+            ("ตอนนี้มีเอกสารรอตรวจกี่ใบ", "pending_review_list", "pending_carousel"),
+            ("ขอดูรายการรอตรวจหน่อยครับ", "pending_review_list", "pending_carousel"),
+            ("มีอะไรค้างตรวจบ้าง", "pending_review_list", "pending_carousel"),
+            ("มีเอกสารที่ยังรอตรวจทานอยู่ไหมคะ", "pending_review_list", "pending_carousel"),
+        ]
+        with patch("line_service.requests.post") as external_post:
+            for api_key in ("", "fake-gemini-key"):
+                self.cfg.llm_api_key = api_key
+                for text, intent, kind in cases:
+                    with self.subTest(llm_enabled=bool(api_key), text=text):
+                        response = self.client.post("/api/line/simulate", data={"text": text})
+                        self.assertEqual(response.status_code, 200)
+                        payload = response.json()
+                        self.assertEqual(payload["intent"], intent)
+                        self.assertEqual(payload["card_view"]["kind"], kind)
+                        self._assert_valid_line_messages(payload["line_messages"])
+                        self.assertEqual(payload["line_messages"][0]["type"], "flex")
+                        if kind == "expense_summary":
+                            self.assertEqual(payload["card_view"]["pending_total"], 125.50)
+                        elif kind == "allergy_watchlist":
+                            self.assertIn("มะลิ", payload["reply_text"])
+                            self.assertIn("แพ้นมวัว", payload["reply_text"])
+                        else:
+                            self.assertEqual(len(payload["documents"]), 1)
+            external_post.assert_not_called()
+
+    def test_natural_questions_use_shared_cards_and_read_lock_on_webhook(self):
+        self.cfg.llm_api_key = "fake-gemini-key"
+        cases = [
+            ("มียอดรอเบิกเท่าไหร่", "expense_summary"),
+            ("ใครแพ้อาหารบ้าง", "allergy_watchlist"),
+            ("มีเอกสารรอตรวจไหม", "pending_carousel"),
+        ]
+        storage = self.test_app.state.storage
+        with patch("line_service.requests.post") as external_post, patch(
+            "line_service.reply_line_messages", return_value=True
+        ) as reply, patch.object(storage, "execute_read", wraps=storage.execute_read) as read:
+            for text, kind in cases:
+                with self.subTest(text=text):
+                    body = json.dumps({"events": [{
+                        "type": "message", "replyToken": "test-token",
+                        "source": {"type": "user", "userId": "Uteacher001"},
+                        "message": {"type": "text", "text": text},
+                    }]}).encode("utf-8")
+                    response = self.client.post("/api/line/webhook", content=body, headers={
+                        "X-Line-Signature": _sign_line_body(body, "chok-secret-123"),
+                        "Content-Type": "application/json",
+                    })
+                    self.assertEqual(response.status_code, 200)
+                    payload = response.json()["replies"][0]
+                    self.assertEqual(payload["card_view"]["kind"], kind)
+                    self.assertEqual(reply.call_args.args[1][0]["type"], "flex")
+                    self._assert_valid_line_messages(reply.call_args.args[1])
+            self.assertEqual(read.call_count, len(cases))
+            external_post.assert_not_called()
+
+    def test_natural_card_routing_preserves_explicit_search_and_ai_writing(self):
+        self.cfg.llm_api_key = "fake-gemini-key"
+        with patch("line_service.generate_nong_chok_ai_reply", return_value="ร่างข้อความตัวอย่าง") as ai:
+            for text in ("ค้นหา ใครแพ้อาหารบ้าง", "หา ยอดรอเบิก", "search มีเอกสารรอตรวจไหม"):
+                with self.subTest(text=text):
+                    response = self.client.post("/api/line/simulate", data={"text": text})
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.json()["intent"], "search")
+            ai.assert_not_called()
+            for text in (
+                "ช่วยร่างข้อความแจ้งผู้ปกครองเรื่องแพ้อาหาร",
+                "ช่วยคิดวิธีติดตามยอดรอเบิก",
+                "เอกสารรอตรวจควรจัดเก็บอย่างไร",
+                "ใครแพ้อาหารบ้าง ช่วยแปลประโยคนี้เป็นอังกฤษ",
+                "มียอดรอเบิกเท่าไหร่ แล้วใครแพ้อาหารบ้าง",
+            ):
+                with self.subTest(text=text):
+                    ai.reset_mock()
+                    response = self.client.post("/api/line/simulate", data={"text": text})
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.json()["intent"], "ai_chat")
+                    ai.assert_called_once()
+
     def test_gemini_flash_system_instruction_and_pinky_teacher_persona(self):
         sys_inst = line_service.build_nong_chok_system_instruction()
         self.assertIn("ครูพิ้งกี้", sys_inst)

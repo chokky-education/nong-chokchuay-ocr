@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import re
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 
@@ -1318,6 +1319,40 @@ def _build_help_menu_response(target_teacher: str, public_base_url: str = "") ->
     }
 
 
+_NATURAL_CARD_COMMAND_PATTERNS = (
+    ("ยอดรอเบิก", (
+        r"(?:มี)?(?:ยอด(?:เงิน)?รอเบิก(?:คืน)?|เงินรอเบิก(?:คืน)?|เงินสำรองจ่าย)"
+        r"(?:อยู่)?(?:เท่าไหร่|เท่าไร|กี่บาท)",
+        r"(?:ขอ(?:ดู)?|ช่วย(?:ดู|สรุป)|ดู|สรุป)"
+        r"(?:ยอด(?:เงิน)?(?:รอเบิก(?:คืน)?|เบิกคืนแล้ว)|ค่าใช้จ่าย|ยอดเงิน|งบ(?:ห้องเรียน)?)",
+    )),
+    ("แพ้อาหาร", (
+        r"(?:ใคร|เด็กคนไหน|มีใคร|มีเด็กคนไหน)(?:ที่)?แพ้อาหาร(?:บ้าง)?",
+        r"(?:มี)?(?:เด็ก|นักเรียน)(?:ที่)?แพ้อาหาร(?:กี่คน|คนไหนบ้าง|บ้าง)",
+        r"(?:ขอ(?:ดู)?|ช่วย(?:ดู|แสดง)|ดู|แสดง)(?:รายชื่อ)?(?:เด็ก|นักเรียน)(?:ที่)?แพ้อาหาร(?:บ้าง)?",
+    )),
+    ("รอตรวจ", (
+        r"(?:มี)?(?:เอกสาร|รายการ|บิล)(?:ที่)?(?:ยัง)?(?:รอตรวจ(?:ทาน)?|ค้างตรวจ)"
+        r"(?:อยู่)?(?:กี่(?:ใบ|ฉบับ|รายการ)|อะไรบ้าง|บ้าง|ไหม|หรือเปล่า)",
+        r"(?:ขอ(?:ดู)?|ช่วย(?:ดู|แสดง)|ดู|แสดง)(?:เอกสาร|รายการ|บิล)"
+        r"(?:ที่)?(?:ยัง)?(?:รอตรวจ(?:ทาน)?|ค้างตรวจ)(?:บ้าง)?",
+        r"มีอะไร(?:รอตรวจ(?:ทาน)?|ค้างตรวจ)(?:บ้าง)?",
+    )),
+)
+
+
+def _resolve_natural_card_command(text: str) -> Optional[str]:
+    """Route supported data requests locally; leave search/writing/ambiguous text to existing flows."""
+    compact = re.sub(r"\s+", "", text.lower()).rstrip("?!！？.。")
+    prefix = r"(?:ตอนนี้|วันนี้)?"
+    suffix = r"(?:ตอนนี้|วันนี้)?(?:ให้หน่อย|หน่อย|ด้วย|ได้ไหม|ได้มั้ย|นะ|ครับ|ค่ะ|คะ|จ๊ะ|จ้า)*"
+    for command, patterns in _NATURAL_CARD_COMMAND_PATTERNS:
+        for pattern in patterns:
+            if re.fullmatch(prefix + pattern + suffix, compact):
+                return command
+    return None
+
+
 def process_line_text_command(
     text: str,
     db_path: str,
@@ -1337,8 +1372,9 @@ def process_line_text_command(
     r2_enabled = bool(config and config.is_r2_enabled())
     clean = (text or "").strip()
     lower = clean.lower()
+    card_command = _resolve_natural_card_command(clean) or lower
 
-    if lower in {"ยอดรอเบิก", "สรุปยอด", "เบิกเงิน", "ค่าใช้จ่าย"}:
+    if card_command in {"ยอดรอเบิก", "สรุปยอด", "เบิกเงิน", "ค่าใช้จ่าย"}:
         return _run_db_read(
             lambda: _build_reimbursement_summary_response(
                 db_path=db_path,
@@ -1347,7 +1383,7 @@ def process_line_text_command(
             )
         )
 
-    if lower in {"แพ้อาหาร", "รายชื่อเด็ก", "ข้อมูลเด็ก", "เด็กในห้อง"}:
+    if card_command in {"แพ้อาหาร", "รายชื่อเด็ก", "ข้อมูลเด็ก", "เด็กในห้อง"}:
         return _run_db_read(
             lambda: _build_allergy_watchlist_response(
                 db_path=db_path,
@@ -1356,7 +1392,7 @@ def process_line_text_command(
             )
         )
 
-    if lower in {"รอตรวจ", "ค้างตรวจ"}:
+    if card_command in {"รอตรวจ", "ค้างตรวจ"}:
         return _run_db_read(
             lambda: _build_pending_review_carousel_response(
                 db_path=db_path,
