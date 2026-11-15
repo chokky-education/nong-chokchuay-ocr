@@ -21,26 +21,25 @@
 
 ---
 
-## 2. สิ่งที่ค้างอยู่และงานถัดไป (Pending Items)
-
-### งานคำถามธรรมชาติ → Mascot Messaging Cards (2026-11-15, ยังไม่ release)
+### งานคำถามธรรมชาติ → Mascot Messaging Cards (release แล้ว 2026-11-15)
 
 - เพิ่มกฎอ่านข้อความใน `line_service.py` ก่อนเรียก LLM สำหรับคำถามที่ขอดูยอดเบิก/รายชื่อเด็กแพ้อาหาร/เอกสารรอตรวจ เช่น “มียอดรอเบิกเท่าไหร่”, “ใครแพ้อาหารบ้าง” และ “มีเอกสารรอตรวจไหม” พร้อมคำลงท้ายสุภาพและการเว้นวรรค
 - ใช้ตัวสร้างการ์ดเดิมและ `storage.execute_read` ร่วมกันทั้ง LINE Webhook และตัวจำลองแชท จึงใช้ข้อมูลจาก SQLite โดยไม่เรียกบริการ LLM สำหรับคำถามที่รองรับ
 - กฎจับทั้งประโยค ไม่จับเพียงคำที่โผล่อยู่ในข้อความ คำสั่งค้นหาโดยตรงและคำขอให้ AI ช่วยเขียนยังใช้เส้นทางเดิม ส่วนประโยคที่มีหลายคำถามหรืออยู่นอกกฎยังอาจตอบเป็นข้อความจาก AI
 - ผลตรวจในเครื่อง: Python syntax และชุดทดสอบ 59 ข้อผ่าน, JavaScript syntax และชุดทดสอบ Worker/Frontend 13 ข้อผ่าน รวม regression tests สำหรับเปิด/ปิด LLM, ข้อมูลยอดเงิน/ชื่อเด็กในฐานทดสอบ, ฐานข้อมูลว่าง, LINE Flex payload, read lock และการคงพฤติกรรมค้นหา/ช่วยเขียน
 - ตรวจผ่าน HTTP กับเซิร์ฟเวอร์และฐานข้อมูลทดสอบที่แยกต่างหาก: คำถามตัวอย่างทั้ง 3 แบบได้ HTTP 200 และ LINE Flex Card ตามประเภท รีสตาร์ตเซิร์ฟเวอร์หลักในเครื่องพอร์ต 8765 เป็นโค้ดล่าสุดแล้ว (`/api/health` ตอบ `READY`) แต่ตัวในเครื่องยังไม่มี Google OAuth จึงตอบ 401 เมื่อเรียก Simulator โดยไม่ล็อกอิน ไม่ได้เปลี่ยนค่าล็อกอินเพื่อข้ามการตรวจนี้
-- สถานะ release: ยังไม่ merge/deploy ต้องตรวจ CI ใน PR และได้รับอนุมัติจากเจ้าของก่อน การส่งการ์ดไปยัง LINE OA จริงและผลบน Cloudflare ยังไม่ได้ตรวจในงานนี้
+- [PR #6](https://github.com/chokky-education/nong-chokchuay-ocr/pull/6) merge แล้วที่ `3c3b98be4952cb8ac0d1bc968af46337b5e16e1d` หลังเจ้าของอนุมัติ CI ของ PR และ merged commit ผ่านครบ GitHub Actions ข้าม deploy เพราะไม่มี `CLOUDFLARE_API_TOKEN` จึง deploy จาก merged checkout ด้วย Wrangler 4.114.0 ที่ล็อกอินอยู่
+- Worker รุ่น `5c29a541-b0bd-4d95-aa6c-3a447c4ab42d` ใช้งาน 100% และ Container เปลี่ยนเป็น image digest `sha256:c50c13490ade6c2299fcd7367d8a81da6aad5fc6a7319a8c1e76fd8e686a1282` ตรวจ Simulator บน Cloudflare ด้วย session ที่ล็อกอินอยู่แล้ว คำถามทั้ง 3 ประเภทได้การ์ดมาสคอตพร้อมข้อมูลจากระบบ ข้อมูลเดิมยังอยู่ และ R2 revision คงเดิมที่ 3
+- ระหว่างตรวจพบ browser cache ของหน้าจอรุ่นเก่า แก้ด้วย hard reload และพบ HTTP 503 หนึ่งครั้งช่วง Container เปลี่ยนรุ่น/เริ่มทำงาน ก่อนทดสอบซ้ำผ่านครบ ยังไม่ได้ส่งข้อความจากแอป LINE จริง ดูหลักฐานและข้อจำกัดใน [บันทึก release PR #6](releases/2026-11-15-pr6-natural-question-cards.md)
 
-1. **ตั้งค่า Google OAuth 2.0 Credentials และค่าลับบน Cloudflare (Wrangler Secrets):**
-   - สร้าง OAuth Client ID (Web application) ใน Google Cloud Console พร้อม Authorized redirect URI: `https://nong-chokchuay-ocr.entrace-space.workers.dev/api/auth/google/callback`
-   - ตั้งค่า secret ด้วย Wrangler ก่อนใช้งานจริง: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `AUTH_SESSION_SECRET`, `ALLOWED_LINE_USER_IDS`, `LINE_CHANNEL_SECRET`, `LINE_CHANNEL_ACCESS_TOKEN`, และ `LLM_API_KEY`
-2. **สร้างและ Bootstrap R2 Bucket ส่วนตัวครั้งแรกหลัง Merge และได้รับอนุมัติ Deploy:**
-   - สร้าง private R2 bucket ชื่อ `nong-chokchuay-vault` (ค่าตั้งต้นตรงกับ `wrangler.toml`) และคงการปิด Public Access
-   - สำหรับครั้งแรกเมื่อ bucket ยังว่าง ให้ deploy ชั่วคราวพร้อม `R2_BOOTSTRAP_IF_EMPTY="true"` และเปิดหน้าเว็บหรือเรียก `/api/health` เพื่อสร้าง snapshot รุ่นแรก แล้วสลับ `R2_BOOTSTRAP_IF_EMPTY="false"` ทันทีเพื่อป้องกันการสร้างฐานว่างทับข้อมูลเดิมในอนาคต
-   - **ตรวจสถานะจริงหลังวางระบบ:** ปัจจุบันโค้ด R2 persistence พร้อมทดสอบครบผ่าน Mock/Loopback R2 แล้ว ยังรอการอนุมัติจากเจ้าของเพื่อ merge PR และทดสอบกับ R2 จริงบน Cloudflare
-3. **การเชื่อมต่อ LINE Webhook จริง:**
-   - ผูก Webhook URL ของ LINE Developers Console เข้ากับ `<PUBLIC_BASE_URL>/api/line/webhook`, เพิ่ม LINE `userId` ทั้ง 2 บัญชีลงใน `ALLOWED_LINE_USER_IDS` และทดสอบส่งรูปบิล/ใบสมัครจากแอป LINE จริง (รวมถึงปุ่มเปิดเบราว์เซอร์ภายนอก)
+---
+
+## 2. สิ่งที่ค้างอยู่และงานถัดไป (Pending Items)
+
+1. **ตรวจ sign-in ใหม่และเตรียม Google OAuth ในเครื่อง:** ระบบจริงมี OAuth/LINE/allowlist/secrets แล้วตาม health และชื่อ bindings ที่ตรวจได้ แต่รอบ PR #6 ใช้ session เดิม ไม่ได้ทดสอบ Google sign-in ใหม่ ส่วน localhost ยังไม่มี Google OAuth
+2. **การ deploy อัตโนมัติผ่าน GitHub Actions:** ยังไม่มี `CLOUDFLARE_API_TOKEN` ใน GitHub Actions จึงข้าม deploy แม้ job สำเร็จ หากจะเปิดใช้งานต้องมีแผนและได้รับอนุมัติการเพิ่ม secret ตาม release workflow; รอบ PR #6 deploy จากเครื่องแล้ว
+3. **ตรวจ LINE OA จากแอปจริง:** health ระบุว่า LINE OA และ allowlist ตั้งค่าแล้ว แต่ยังไม่ได้ตรวจ URL ใน LINE Developers Console หรือบัญชีผู้ใช้ทุกบัญชีในรอบนี้ ต้องทดสอบข้อความ/รูปบิล/ใบสมัครและลิงก์เปิดเว็บจากแอป LINE จริงเพิ่มเติม
+4. **ตรวจ R2 เพิ่มเติมตาม flow:** ระบบจริงใช้ R2 และกู้ข้อมูลเดิมหลังเปลี่ยน Container ได้แล้ว โดย `R2_BOOTSTRAP_IF_EMPTY=false` ไม่ต้อง bootstrap ซ้ำ การตรวจ upload/ยืนยันบิล/Watch Folder/restore จาก snapshot รุ่นก่อนหน้าบน production ยังอยู่นอกการตรวจ PR #6
 
 ---
 
