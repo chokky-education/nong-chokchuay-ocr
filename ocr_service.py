@@ -105,11 +105,21 @@ def apply_intelligence_to_document(
         )
 
     expense_record = None
+    settings = database.get_teacher_settings(db_path)
     if (force_expense or intel.get("is_expense")) and intel.get("expense"):
         exp = intel["expense"]
         reimb_status = exp.get("reimbursement_status")
         budget_source = exp.get("budget_source")
-        if "ส่วนตัว" in merged_tags and exp.get("expense_category") not in {"classroom", "kids_snack"}:
+        # Preferences apply only on first ingestion, never on re-extraction of an existing record.
+        doc = database.get_document_by_id(doc_id, db_path=db_path, r2_enabled=r2_enabled)
+        existing_expense = (doc or {}).get("expense")
+        if existing_expense:
+            reimb_status = existing_expense["reimbursement_status"]
+            budget_source = existing_expense["budget_source"]
+        elif settings["configured"]:
+            reimb_status = settings["default_reimbursement_status"]
+            budget_source = None  # Resolve from the chosen status/category in database.py.
+        if not existing_expense and "ส่วนตัว" in merged_tags and exp.get("expense_category") not in {"classroom", "kids_snack"}:
             reimb_status = "personal"
             budget_source = "personal"
         expense_record = database.upsert_expense(
@@ -131,6 +141,10 @@ def apply_intelligence_to_document(
     student_record = None
     if (force_student or intel.get("is_student")) and intel.get("student"):
         stu = intel["student"]
+        classroom = stu.get("classroom") or "อนุบาล"
+        if classroom == "อนุบาล":
+            existing_student = database.get_student_by_document_id(doc_id, db_path=db_path)
+            classroom = existing_student["classroom"] if existing_student else settings["classroom"]
         if any(stu.get(k) for k in ("full_name", "nickname", "citizen_id", "parent_phone", "allergies")):
             student_record = database.upsert_student(
                 document_id=doc_id,
@@ -138,7 +152,7 @@ def apply_intelligence_to_document(
                 nickname=stu.get("nickname", ""),
                 citizen_id=stu.get("citizen_id", ""),
                 birth_date=stu.get("birth_date", ""),
-                classroom=stu.get("classroom", "อนุบาล"),
+                classroom=classroom,
                 parent_name=stu.get("parent_name", ""),
                 parent_phone=stu.get("parent_phone", ""),
                 allergies=stu.get("allergies", ""),

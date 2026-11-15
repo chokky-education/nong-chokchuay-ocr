@@ -7,3 +7,5 @@ data/
 .pytest_cache/
 .wrangler/
 .worktrees/
+.playwright-cli/
+output/playwright/

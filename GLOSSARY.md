@@ -68,6 +68,12 @@
 
 ## 3. ช่องทางแชทและการเชื่อมต่อ
 
+### **Teacher Settings** (การตั้งค่าคุณครู)
+- **ความหมาย:** ค่าที่ใช้ร่วมกันทั้ง Vault ใน SQLite `teacher_settings` ได้แก่ชื่อที่บอตใช้เรียก (`teacher_name`), ห้องเรียนเริ่มต้น (`classroom`) และสถานะเบิกจ่ายเริ่มต้น (`default_reimbursement_status`: `pending_reimbursement` / `personal`) ใช้กับข้อมูลใหม่ผ่านตรรกะนำเข้ากลาง และ commit R2 ก่อนตอบว่าบันทึกสำเร็จ ไม่ใช่ข้อมูลรายบัญชี และไม่เปลี่ยนข้อมูลเก่าย้อนหลัง
+
+### **LINE Rich Menu** (เมนูหลักใต้แชท LINE)
+- **ความหมาย:** ภาพพร้อมพื้นที่กด 8 จุดของน้องโชคช่วย แต่ละจุดส่ง Postback ไปยังตรรกะ LINE เดิม หรือเปิดหน้าเว็บที่มี Google auth นิยามพิกัดและ action ใน `rich_menu.py` ร่วมกับตัวจำลอง ต่างจาก Flex Card และ Quick Reply ที่อยู่ในข้อความตอบกลับ ดู [พฤติกรรมและการติดตั้ง](docs/rich-menu.md)
+
 ### **LINE OA Channel** (ช่องทาง LINE Official Account)
 - **ความหมาย:** ส่วนรับเหตุการณ์ Webhook (`/api/line/webhook`) และตัวจำลองแชท (`/api/line/simulate`) ใน `line_service.py` ที่ตรวจสอบลายเซ็น `X-Line-Signature`, ตอบกลับฟรีด้วย `replyToken` ในรูปแบบ Flex Card, รองรับปุ่ม Postback สำหรับยืนยันการตรวจหรือเปลี่ยนสถานะเบิกเงิน และรับคำสั่งค้นหาในแชท (`"ยอดรอเบิก"`, `"แพ้อาหาร"`, หรือคำค้นเอกสาร)
 - **คำที่ต้องหลีกเลี่ยง:** Bot Pipe, Chat Feed

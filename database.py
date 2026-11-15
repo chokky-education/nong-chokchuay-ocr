@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import uuid
+from contextlib import closing
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
@@ -13,7 +14,7 @@ UPLOADS_DIR = os.path.join(DB_DIR, "uploads")
 os.makedirs(DB_DIR, exist_ok=True)
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 
-SUPPORTED_SCHEMA_VERSION = 3
+SUPPORTED_SCHEMA_VERSION = 4
 MAX_SNAPSHOT_BYTES = 100 * 1024 * 1024
 
 _DOCUMENT_MIGRATION_COLUMNS = {
@@ -284,11 +285,51 @@ def init_db(db_path: Optional[str] = None) -> None:
     );
     """)
 
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS teacher_settings (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        teacher_name TEXT NOT NULL,
+        classroom TEXT NOT NULL,
+        default_reimbursement_status TEXT NOT NULL
+            CHECK (default_reimbursement_status IN ('pending_reimbursement', 'personal')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        updated_by TEXT NOT NULL DEFAULT ''
+    );
+    """)
     conn.execute(f"PRAGMA user_version = {SUPPORTED_SCHEMA_VERSION}")
 
     conn.commit()
     conn.close()
     print("[DB] Database initialized at:", target_path)
+
+
+def get_teacher_settings(db_path: Optional[str] = None, *, teacher_name: str = "ครูพิ้งกี้") -> Dict[str, Any]:
+    """Shared vault preferences, with environment/legacy defaults until first save."""
+    with closing(get_db_connection(db_path)) as conn:
+        row = conn.execute("SELECT * FROM teacher_settings WHERE id = 1").fetchone()
+    if row:
+        return {**dict(row), "configured": True}
+    return {
+        "teacher_name": teacher_name, "classroom": "อนุบาล",
+        "default_reimbursement_status": "pending_reimbursement",
+        "configured": False, "created_at": "", "updated_at": "", "updated_by": "",
+    }
+
+
+def save_teacher_settings(settings: Dict[str, str], *, updated_by: str = "", db_path: Optional[str] = None) -> Dict[str, Any]:
+    now = _utc_iso()
+    with closing(get_db_connection(db_path)) as conn, conn:
+        conn.execute("""
+            INSERT INTO teacher_settings
+                (id, teacher_name, classroom, default_reimbursement_status, created_at, updated_at, updated_by)
+            VALUES (1, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET teacher_name=excluded.teacher_name,
+                classroom=excluded.classroom,
+                default_reimbursement_status=excluded.default_reimbursement_status,
+                updated_at=excluded.updated_at, updated_by=excluded.updated_by
+        """, (settings["teacher_name"], settings["classroom"], settings["default_reimbursement_status"], now, now, updated_by))
+    return get_teacher_settings(db_path)
 
 
 def has_any_vault_data(db_path: Optional[str] = None) -> bool:
@@ -1592,6 +1633,8 @@ def validate_sqlite_snapshot_file(
             ).fetchall()
         }
         required_tables = {"documents", "expenses", "students"}
+        if user_version >= 4:
+            required_tables.add("teacher_settings")
         missing = required_tables - tables
         if missing:
             raise ValueError(f"Snapshot missing required tables: {sorted(missing)}")

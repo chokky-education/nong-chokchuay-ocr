@@ -69,6 +69,7 @@
         <span>📂 ตู้เซฟเอกสาร</span>
         <span id="db-count-badge" class="badge badge-sky-pill">0</span>
       </button>
+      <button type="button" id="btn-open-settings" class="btn btn-secondary btn-sm">ตั้งค่า</button>
       <button id="btn-scan-inbox" class="btn btn-secondary btn-sm" title="ดึงไฟล์ที่วางไว้ในโฟลเดอร์ data/inbox">
         <span>📥 รับไฟล์จากแฟ้ม</span>
         <span id="inbox-count-badge" class="badge">0</span>
@@ -85,8 +86,8 @@
     <div class="nong-chok-bubble">
       <img src="/static/mascot.jpg" alt="น้องโชค" class="bubble-mascot">
       <div class="bubble-text-wrap">
-        <div class="bubble-speaker">🌤️ น้องโชคช่วยบอกครูพิ้งกี้ว่า:</div>
-        <p id="nong-chok-speech" class="bubble-message">สวัสดีครับครูพิ้งกี้! โยนรูปบิล รูปเอกสารเด็ก หรือ PDF คำสั่งโรงเรียนเข้ามาได้เลยนะครับ เดี๋ยวน้องโชคช่วยจัดระเบียบให้เองครับ</p>
+        <div class="bubble-speaker" id="teacher-greeting-label">น้องโชคช่วยบอกคุณครูว่า:</div>
+        <p id="nong-chok-speech" class="bubble-message">สวัสดีครับคุณครู! ส่งรูปบิล รูปเอกสารเด็ก หรือ PDF คำสั่งโรงเรียนเข้ามาได้เลยนะครับ</p>
       </div>
     </div>
 
@@ -112,7 +113,36 @@
   </section>
 
   <!-- Main Teacher Desk -->
-  <main>
+  <section id="settings-page" class="settings-page" aria-labelledby="settings-title" hidden>
+    <button type="button" id="btn-settings-back" class="btn btn-secondary">กลับหน้าหลัก</button>
+    <div class="settings-heading">
+      <img src="/static/mascot_cards/hero_menu.png" alt="" width="110" height="128">
+      <div><h2 id="settings-title" tabindex="-1">ตั้งค่าของคุณครู</h2>
+        <p>ให้น้องโชคเรียกชื่อถูก และเตรียมข้อมูลให้ตรงกับงานของคุณครู</p></div>
+    </div>
+    <p class="settings-note">การตั้งค่านี้ใช้ร่วมกันทั้งคลังเอกสาร บนเว็บและ LINE มีผลกับข้อมูลใหม่หลังบันทึก ส่วนข้อมูลเดิมยังคงอยู่ตามที่เคยบันทึกไว้</p>
+    <p id="settings-error" class="settings-error" role="alert" hidden></p>
+    <button type="button" id="btn-settings-retry" class="btn btn-secondary" hidden>โหลดการตั้งค่าอีกครั้ง</button>
+    <form id="settings-form">
+      <fieldset id="settings-fields" disabled>
+        <label for="settings-teacher-name">ชื่อที่บอตใช้เรียก</label>
+        <input id="settings-teacher-name" name="teacher_name" type="text" maxlength="60" required placeholder="เช่น ครูพิ้งกี้" autocomplete="nickname">
+        <label for="settings-classroom">ห้องเรียนเริ่มต้น</label>
+        <input id="settings-classroom" name="classroom" type="text" maxlength="40" required placeholder="เช่น อนุบาล 2/1" aria-describedby="settings-classroom-help">
+        <p id="settings-classroom-help" class="settings-help">ใช้เมื่อเพิ่มเด็กใหม่ หรือเมื่อเอกสารไม่ได้ระบุห้องเรียน</p>
+        <label for="settings-reimbursement">สถานะเบิกจ่ายเริ่มต้น</label>
+        <select id="settings-reimbursement" name="default_reimbursement_status" aria-describedby="settings-reimbursement-help">
+          <option value="pending_reimbursement">รอเบิกคืนโรงเรียน</option>
+          <option value="personal">จ่ายส่วนตัว</option>
+        </select>
+        <p id="settings-reimbursement-help" class="settings-help">ใช้กับบิลใหม่ คุณครูตรวจและแก้เป็นรายบิลได้ ระบบจะไม่ถือว่าเบิกคืนแล้วโดยอัตโนมัติ ส่วนบิลที่ติดป้าย “ส่วนตัว” ยังใช้กฎแยกตามประเภทเอกสารเดิม</p>
+        <button type="submit" id="btn-save-settings" class="btn btn-primary">บันทึกการตั้งค่า</button>
+      </fieldset>
+    </form>
+    <p id="settings-save-status" class="settings-save-status" role="status" aria-live="polite"></p>
+  </section>
+
+  <main id="teacher-desk">
     <!-- Left Column: Upload & Document Preview -->
     <div class="panel">
       <div class="panel-header">
@@ -537,7 +567,7 @@
   </div>
 
   <!-- Modal 4: Interactive LINE OA Simulator ("น้องโชคช่วย LINE OA") -->
-  <div class="modal-backdrop" id="line-sim-modal" style="display: none;">
+  <div class="modal-backdrop" id="line-sim-modal" role="dialog" aria-modal="true" aria-label="ตัวจำลองแชท LINE" style="display: none;">
     <div class="modal-content line-sim-shell">
       <div class="line-sim-header">
         <div style="display: flex; align-items: center; gap: 0.65rem;">
@@ -550,15 +580,7 @@
         <button id="btn-close-line-sim" class="btn btn-sm" style="background: rgba(255,255,255,0.2); color: white; border: none;">✕ ปิด</button>
       </div>
 
-      <div class="line-chat-messages" id="line-chat-messages">
-        <div class="line-msg line-msg-bot">
-          <img src="/static/mascot_cards/avatar.png" alt="น้องโชค" class="line-msg-avatar">
-          <div class="line-bubble line-bubble-bot">
-            สวัสดีครับครูพิ้งกี้! 🌤️ นี่คือแชท LINE OA ของน้องโชคช่วยครับ<br>
-            ครูพิ้งกี้ลองกดส่งรูปบิลจากร้านค้า กดปุ่มชิปลัด หรือเลือกจากเมนูด้านล่างได้เลยนะครับ
-          </div>
-        </div>
-      </div>
+      <div class="line-chat-messages" id="line-chat-messages"></div>
 
       <!-- LINE Quick Replies Strip -->
       <div class="line-quick-replies-bar" id="line-quick-replies"></div>
@@ -572,32 +594,7 @@
       </div>
 
       <!-- LINE OA Rich Menu -->
-      <div class="line-rich-menu">
-        <button type="button" class="rich-menu-btn" data-line-preset="classroom_receipt">
-          <span class="rm-icon">🧾</span>
-          <span>ส่งรูปบิลตัวอย่าง</span>
-        </button>
-        <button type="button" class="rich-menu-btn" data-line-preset="student_profile">
-          <span class="rm-icon">👶</span>
-          <span>ส่งใบเด็กตัวอย่าง</span>
-        </button>
-        <button type="button" class="rich-menu-btn" data-line-cmd="รอตรวจ">
-          <span class="rm-icon">📥</span>
-          <span>รายการรอตรวจ</span>
-        </button>
-        <button type="button" class="rich-menu-btn" data-line-cmd="ยอดรอเบิก">
-          <span class="rm-icon">💸</span>
-          <span>สรุปยอดรอเบิก</span>
-        </button>
-        <button type="button" class="rich-menu-btn" data-line-cmd="แพ้อาหาร">
-          <span class="rm-icon">⚠️</span>
-          <span>เด็กแพ้อาหาร</span>
-        </button>
-        <button type="button" class="rich-menu-btn" data-line-cmd="เมนู">
-          <span class="rm-icon">📋</span>
-          <span>เมนูคำสั่งลัด</span>
-        </button>
-      </div>
+      <div class="line-rich-menu" id="line-rich-menu" role="group" aria-label="เมนูน้องโชคช่วย 8 ปุ่ม"></div>
     </div>
   </div>
 

@@ -79,11 +79,25 @@
     pendingUploadKey: '',
     pendingUploadSignature: '',
     lineSimBusy: false,
+    teacherSettings: null,
+    richMenu: null,
+    settingsSaving: false,
   };
 
   const $ = (id) => document.getElementById(id);
 
   const els = {
+    settingsPage: $('settings-page'),
+    settingsForm: $('settings-form'),
+    settingsFields: $('settings-fields'),
+    settingsName: $('settings-teacher-name'),
+    settingsClassroom: $('settings-classroom'),
+    settingsReimbursement: $('settings-reimbursement'),
+    settingsError: $('settings-error'),
+    settingsStatus: $('settings-save-status'),
+    settingsRetry: $('btn-settings-retry'),
+    settingsSave: $('btn-save-settings'),
+    richMenu: $('line-rich-menu'),
     // Auth Gate & Header User Pill
     authGate: $('auth-gate'),
     authErrorBanner: $('auth-error-banner'),
@@ -317,6 +331,16 @@
   }
 
   function clearRenderedWorkspaceData() {
+    state.teacherSettings = null;
+    state.richMenu = null;
+    if (els.settingsPage) els.settingsPage.hidden = true;
+    document.body.dataset.view = '';
+    [els.settingsName, els.settingsClassroom, els.settingsReimbursement].forEach((el) => { if (el) el.value = ''; });
+    if (els.settingsFields) els.settingsFields.disabled = true;
+    if (els.settingsStatus) els.settingsStatus.textContent = '';
+    if ($('teacher-greeting-label')) $('teacher-greeting-label').textContent = 'น้องโชคช่วยบอกคุณครูว่า:';
+    if (els.settingsError) { els.settingsError.textContent = ''; els.settingsError.hidden = true; }
+    if (els.richMenu) els.richMenu.innerHTML = '';
     state.currentDocId = null;
     state.currentDocData = null;
     state.currentFile = null;
@@ -838,6 +862,8 @@
 
         if (els.nongChokSpeech) {
           const tName = sys.teacher_name || 'ครูพิ้งกี้';
+          if (state.teacherSettings) state.teacherSettings.teacher_name = tName;
+          if ($('teacher-greeting-label')) $('teacher-greeting-label').textContent = `น้องโชคช่วยบอก${tName}ว่า:`;
           const notes = [];
           if (pendingReview > 0) notes.push(`มีเอกสารรอ${tName}ตรวจ ${pendingReview} ฉบับ`);
           if (pendingReimb > 0) notes.push(`ยอดสำรองจ่ายรอเบิกคืน ${formatMoney(pendingReimb)} บาท`);
@@ -1274,7 +1300,7 @@
     els.stuNickname.value = '';
     els.stuCitizenId.value = '';
     els.stuBirthDate.value = '';
-    els.stuClassroom.value = 'อนุบาล';
+    els.stuClassroom.value = state.teacherSettings?.classroom || 'อนุบาล';
     els.stuParentName.value = '';
     els.stuParentPhone.value = '';
     els.stuAllergies.value = '';
@@ -1423,6 +1449,7 @@
     state.lineSimBusy = Boolean(busy);
     if (els.btnLineSimSend) els.btnLineSimSend.disabled = state.lineSimBusy;
     if (els.btnLineSimPhoto) els.btnLineSimPhoto.disabled = state.lineSimBusy;
+    els.richMenu?.querySelectorAll('button').forEach((button) => { button.disabled = state.lineSimBusy; });
   }
 
   function ensureLineWelcomeGreeting() {
@@ -1443,8 +1470,8 @@
     const bubble = document.createElement('div');
     bubble.className = 'line-bubble line-bubble-bot';
     bubble.textContent =
-      'สวัสดีครับครูพิ้งกี้! 🌤️ นี่คือแชท LINE OA ของน้องโชคช่วยครับ\n' +
-      'ครูพิ้งกี้ลองกดส่งรูปบิลจากร้านค้า กดปุ่มชิปลัด หรือเลือกจากเมนูด้านล่างได้เลยนะครับ';
+      `สวัสดีครับ${state.teacherSettings?.teacher_name || 'คุณครู'}! นี่คือแชท LINE OA ของน้องโชคช่วยครับ\n` +
+      'ลองกดส่งบิล / เอกสาร หรือเลือกจากเมนูด้านล่างได้เลยนะครับ';
 
     row.append(avatar, bubble);
     els.lineChatMessages.appendChild(row);
@@ -1492,12 +1519,20 @@
     els.lineQuickReplies.innerHTML = '';
     const list = Array.isArray(items) && items.length ? items : DEFAULT_LINE_QUICK_REPLIES;
     list.forEach((qr) => {
-      if (!qr || !qr.label || !qr.text) return;
+      if (!qr || !qr.label || (!qr.text && !['camera', 'cameraRoll'].includes(qr.type))) return;
       const chip = document.createElement('button');
       chip.type = 'button';
       chip.className = 'line-quick-chip';
       chip.textContent = qr.label;
-      chip.addEventListener('click', () => sendLineSimText(qr.text));
+      chip.addEventListener('click', () => {
+        if (qr.type === 'camera' || qr.type === 'cameraRoll') {
+          if (state.lineSimBusy) return;
+          if (qr.type === 'camera') els.lineSimFileInput.setAttribute('capture', 'environment');
+          else els.lineSimFileInput.removeAttribute('capture');
+          els.lineSimFileInput.accept = 'image/*';
+          els.lineSimFileInput.click();
+        } else sendLineSimText(qr.text);
+      });
       els.lineQuickReplies.appendChild(chip);
     });
   }
@@ -1621,7 +1656,7 @@
       if (!items.length) {
         const empty = document.createElement('div');
         empty.className = 'mc-subhead';
-        empty.textContent = '🎉 ตรวจเอกสารครบทุกใบแล้วครับครูพิ้งกี้!';
+        empty.textContent = `🎉 ตรวจเอกสารครบทุกใบแล้วครับ${state.teacherSettings?.teacher_name || 'คุณครู'}!`;
         body.appendChild(empty);
       } else {
         const sub = document.createElement('div');
@@ -1841,7 +1876,7 @@
       } else {
         const sub = document.createElement('div');
         sub.className = 'mc-subhead';
-        sub.textContent = 'เลือกคำสั่งด่วน หรือส่งรูปบิล/ใบสมัครเข้าแชทได้เลยครับ';
+        sub.textContent = cv.help_text || 'เลือกคำสั่งด่วน หรือส่งรูปบิล/ใบสมัครเข้าแชทได้เลยครับ';
         body.appendChild(sub);
       }
       const scGrid = document.createElement('div');
@@ -1937,7 +1972,8 @@
 
     row.appendChild(col);
     els.lineChatMessages.appendChild(row);
-    renderLineQuickReplies(res.quick_replies);
+    const nativeReplies = res.line_messages?.at(-1)?.quickReply?.items;
+    renderLineQuickReplies(res.quick_replies || nativeReplies?.map((item) => item.action));
     scrollLineChatBottom();
   }
 
@@ -2033,6 +2069,10 @@
   }
 
   function bindEvents() {
+    $('btn-open-settings')?.addEventListener('click', () => openWorkspaceView('settings'));
+    $('btn-settings-back')?.addEventListener('click', () => openWorkspaceView(''));
+    els.settingsForm?.addEventListener('submit', saveTeacherSettings);
+    els.settingsRetry?.addEventListener('click', loadTeacherSettings);
     // Auth Gate & Header Logout
     els.btnLogout?.addEventListener('click', handleLogout);
     els.btnCopyLoginUrl?.addEventListener('click', async () => {
@@ -2307,20 +2347,165 @@
         sendLineSimText(val);
       }
     });
-    els.btnLineSimPhoto?.addEventListener('click', () => els.lineSimFileInput.click());
+    els.btnLineSimPhoto?.addEventListener('click', () => {
+      els.lineSimFileInput.removeAttribute('capture');
+      els.lineSimFileInput.accept = 'image/*,application/pdf';
+      els.lineSimFileInput.click();
+    });
     els.lineSimFileInput?.addEventListener('change', (e) => {
       if (e.target.files?.[0]) sendLineSimFile(e.target.files[0]);
       e.target.value = '';
     });
-    document.querySelectorAll('.rich-menu-btn').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        if (btn.dataset.linePreset) {
-          sendLineSimPreset(btn.dataset.linePreset);
-        } else if (btn.dataset.lineCmd) {
-          sendLineSimText(btn.dataset.lineCmd);
-        }
+  }
+
+  const WORKSPACE_VIEWS = new Set(['settings', 'expenses', 'students', 'search', 'review', 'upload']);
+  const PENDING_VIEW_KEY = 'nong-chok-pending-view';
+
+  async function loadTeacherSettings() {
+    els.settingsFields.disabled = true;
+    els.settingsError.hidden = true;
+    els.settingsRetry.hidden = true;
+    try {
+      const res = await apiFetch('/api/settings');
+      if (authState.required && !authState.authenticated) return;
+      state.teacherSettings = res.settings;
+      els.settingsName.value = res.settings.teacher_name;
+      els.settingsClassroom.value = res.settings.classroom;
+      els.settingsReimbursement.value = res.settings.default_reimbursement_status;
+      if (!res.settings.configured) els.settingsStatus.textContent = 'ยังไม่เคยบันทึกการตั้งค่า ระบบใช้กฎเดิมจนกว่าจะกดบันทึก';
+      els.settingsFields.disabled = false;
+    } catch (err) {
+      els.settingsError.textContent = `โหลดการตั้งค่าไม่สำเร็จ: ${err.message}`;
+      els.settingsError.hidden = false;
+      els.settingsRetry.hidden = false;
+    }
+  }
+
+  async function saveTeacherSettings(event) {
+    event.preventDefault();
+    if (state.settingsSaving) return;
+    const payload = {
+      teacher_name: els.settingsName.value.trim(),
+      classroom: els.settingsClassroom.value.trim(),
+      default_reimbursement_status: els.settingsReimbursement.value,
+    };
+    if (!payload.teacher_name || !payload.classroom) {
+      els.settingsError.textContent = 'กรุณากรอกชื่อที่บอตใช้เรียกและห้องเรียน';
+      els.settingsError.hidden = false;
+      return;
+    }
+    state.settingsSaving = true;
+    els.settingsFields.disabled = true;
+    els.settingsSave.textContent = 'กำลังบันทึก…';
+    els.settingsStatus.textContent = '';
+    els.settingsError.hidden = true;
+    try {
+      const res = await apiFetch('/api/settings', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
       });
-    });
+      if (authState.required && !authState.authenticated) return;
+      state.teacherSettings = res.settings;
+      els.settingsStatus.textContent = 'บันทึกแล้ว ใช้กับเอกสารใหม่บนเว็บและ LINE ได้เลยครับ';
+      await loadSystemStats();
+    } catch (err) {
+      els.settingsError.textContent = `ยังบันทึกไม่สำเร็จ: ${err.message}`;
+      els.settingsError.hidden = false;
+    } finally {
+      state.settingsSaving = false;
+      els.settingsFields.disabled = authState.required && !authState.authenticated;
+      els.settingsSave.textContent = 'บันทึกการตั้งค่า';
+    }
+  }
+
+  async function openWorkspaceView(view, updateUrl = true) {
+    if (authState.required && !authState.authenticated) return;
+    [els.dbModal, els.expenseModal, els.studentModal, els.lineSimModal].forEach(closeModal);
+    document.body.dataset.view = view === 'settings' ? 'settings' : '';
+    els.settingsPage.hidden = view !== 'settings';
+    if (updateUrl) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('doc');
+      if (view) url.searchParams.set('view', view); else url.searchParams.delete('view');
+      window.history?.replaceState?.({}, '', url.pathname + url.search + url.hash);
+    }
+    if (view === 'settings') {
+      els.settingsStatus.textContent = '';
+      await loadTeacherSettings();
+      $('settings-title')?.focus?.();
+    } else if (view === 'expenses') {
+      els.expenseMonthFilter.value = '';
+      els.expenseReimbFilter.value = '';
+      els.expenseCategoryFilter.value = '';
+      els.expenseTagFilter.value = '';
+      openModal(els.expenseModal);
+      await loadExpensesLedger();
+    } else if (view === 'students') {
+      els.studentSearchInput.value = '';
+      els.studentClassroomFilter.value = '';
+      els.studentAllergyOnly.checked = false;
+      openModal(els.studentModal);
+      await loadStudentsRoster();
+    } else if (view === 'search' || view === 'review') {
+      els.dbReviewFilter.value = view === 'review' ? 'pending_review' : '';
+      els.dbSearchInput.value = '';
+      els.dbCategoryFilter.value = '';
+      els.dbTagFilter.value = '';
+      openModal(els.dbModal);
+      await loadVaultDocuments();
+      els.dbSearchInput?.focus?.();
+    } else if (view === 'upload') {
+      els.btnSelectFile?.focus?.();
+    }
+  }
+
+  async function loadRichMenu() {
+    try {
+      const res = await apiFetch('/api/line/rich-menu');
+      if (authState.required && !authState.authenticated) return;
+      state.richMenu = res;
+      els.richMenu.innerHTML = '';
+      const img = document.createElement('img');
+      img.src = res.image_path;
+      img.alt = '';
+      img.width = res.menu.size.width;
+      img.height = res.menu.size.height;
+      els.richMenu.appendChild(img);
+      res.items.forEach((item) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'rich-menu-hotspot';
+        button.title = item.label;
+        button.setAttribute('aria-label', item.label);
+        button.dataset.richMenuKey = item.key;
+        const b = item.bounds;
+        Object.assign(button.style, {
+          left: `${100 * b.x / res.menu.size.width}%`, top: `${100 * b.y / res.menu.size.height}%`,
+          width: `${100 * b.width / res.menu.size.width}%`, height: `${100 * b.height / res.menu.size.height}%`,
+        });
+        button.addEventListener('click', async () => {
+          if (state.lineSimBusy) return;
+          if (item.action.type === 'uri') {
+            const view = new URL(item.action.uri).searchParams.get('view');
+            if (WORKSPACE_VIEWS.has(view)) await openWorkspaceView(view);
+          } else {
+            appendLineUserMessage(item.label);
+            await handleLineSimAction({ data: item.action.data, action: 'run_cmd' });
+            if (item.key === 'search') {
+              els.lineSimTextInput.value = 'ค้นหา ';
+              els.lineSimTextInput?.focus?.();
+            }
+          }
+        });
+        els.richMenu.appendChild(button);
+      });
+    } catch (err) {
+      if (authState.required && !authState.authenticated) return;
+      els.richMenu.textContent = `โหลดเมนูไม่สำเร็จ: ${err.message}`;
+      const retry = document.createElement('button');
+      retry.type = 'button'; retry.className = 'btn btn-secondary'; retry.textContent = 'โหลดเมนูอีกครั้ง';
+      retry.addEventListener('click', loadRichMenu);
+      els.richMenu.appendChild(retry);
+    }
   }
 
   async function init() {
@@ -2330,11 +2515,23 @@
     }
     bindEvents();
 
+    const view = new URLSearchParams(window.location.search || '').get('view');
+    // OAuth returns to /. Preserve only known internal destinations in this browser tab.
+    try { if (WORKSPACE_VIEWS.has(view)) window.sessionStorage?.setItem(PENDING_VIEW_KEY, view); } catch (_) { /* storage unavailable */ }
+
     const canEnterWorkspace = await checkAuthStatus();
     if (!canEnterWorkspace) return;
 
     syncTechMode();
     await loadSystemStats();
+    await Promise.allSettled([loadTeacherSettings(), loadRichMenu()]);
+
+    let pendingView = view;
+    try {
+      pendingView = view || window.sessionStorage?.getItem(PENDING_VIEW_KEY);
+      window.sessionStorage?.removeItem(PENDING_VIEW_KEY);
+    } catch (_) { /* use URL destination */ }
+    if (WORKSPACE_VIEWS.has(pendingView)) await openWorkspaceView(pendingView);
 
     const urlParams = new URLSearchParams(window.location.search || '');
     const deepDocId = urlParams.get('doc');

@@ -34,7 +34,7 @@
 | `app.py` | FastAPI Web Server และ REST API ทั้งหมด (Auth Middleware, Google OAuth, OCR, Vault, Review Queue, Expenses, Students, Watcher, LINE Webhook/Simulator) | เรียกใช้ `auth_service`, `VaultService`, `VaultDatabase`, `InboxWatcher`, `LineService` |
 | `auth_service.py` | ระบบยืนยันตัวตน Google OAuth 2.0, ตรวจสิทธิ์ 2 อีเมล, Cookie session (HMAC-SHA256 + SQLite `auth_sessions`), และตรวจ Origin/CSRF | เชื่อม `app.py`, `database.py`, และ `config.py` |
 | `config.py` | โหลดค่าตั้งต้นจาก `.env` และ Environment Variables สร้างเป็น `AppConfig` (แบบ fail-closed สำหรับค่า Auth และตั้งค่า R2 Gateway) | กำหนดพาธ `data/`, `AUTH_REQUIRED`, `ALLOWED_EMAILS`, Google OAuth, `ALLOWED_LINE_USER_IDS`, `R2_GATEWAY_URL`, `R2_REQUIRED`, `R2_BOOTSTRAP_IF_EMPTY`, `SNAPSHOT_RETENTION_COUNT`, LLM และ `TEACHER_NAME` |
-| `database.py` | จัดการ SQLite (`data/documents.db`), FTS5 trigram index, CRUD และการทำ migration อัตโนมัติแบบรันซ้ำได้ (`PRAGMA user_version = 3`) | ตาราง `documents`, `documents_fts`, `expenses`, `students`, `auth_sessions`, `vault_operations`, `pending_r2_deletions`, ฟังก์ชัน snapshot/validate และส่งออก CSV (UTF-8 BOM) |
+| `database.py` | จัดการ SQLite (`data/documents.db`), FTS5 trigram index, CRUD และการทำ migration อัตโนมัติแบบรันซ้ำได้ (`PRAGMA user_version = 4`) | ตาราง `documents`, `documents_fts`, `expenses`, `students`, `auth_sessions`, `vault_operations`, `pending_r2_deletions`, ฟังก์ชัน snapshot/validate และส่งออก CSV (UTF-8 BOM) |
 | `storage_service.py` | จัดการการจัดเก็บถาวรบน Cloudflare R2 (`VaultStorageCoordinator`, `R2GatewayClient`): startup restore gate, lock, rollback, conditional ETag manifest commit และ lazy restore | เชื่อม `app.py`, `ocr_service.py`, `watcher.py`, `line_service.py`, `auth_service.py` เข้ากับ Worker `VaultR2Gateway` (`http://r2.internal`) |
 | `ocr_service.py` | ท่อประมวลผลกลาง (`VaultService`) สำหรับทุกช่องทางนำเข้า จัดการไฟล์ต้นฉบับ เรียก OCR และเชื่อมตัวสกัดข้อมูล | เชื่อม `LineOCR`, `VaultDatabase`, และ `extractor.py` |
 | `extractor.py` | สกัดข้อมูลใบเสร็จ/บิลเบิกจ่าย หมวดหมู่เอกสาร ป้ายกำกับอัตโนมัติ และข้อมูลทะเบียนเด็กอนุบาล | รองรับทั้งโหมด Offline Thai Regex (`regex`) และ Text-only LLM (`llm` ผ่าน Gemini หรือ OpenAI-compatible API) |
@@ -42,6 +42,20 @@
 | `watcher.py` | ตรวจจับไฟล์ใหม่ใน `data/inbox/` (รวมถึงโฟลเดอร์ย่อย `teacher/` และ `me/`) เพื่อนำเข้าคลังอัตโนมัติ และแยกไฟล์เสียเข้า `data/inbox_failed/` | รันเป็น Background thread ใน `app.py` หรือสั่งสแกนทันทีผ่าน `/api/watcher/scan-now` |
 
 ---
+
+### Rich Menu และการตั้งค่าคุณครู (PR)
+
+| ไฟล์ / เส้นทาง | หน้าที่ |
+| --- | --- |
+| `rich_menu.py` | นิยามภาพ, ขนาด, พิกัดและ action ของ Rich Menu 8 ปุ่มร่วมกันระหว่าง LINE และตัวจำลอง |
+| `static/rich_menu/menu.jpg` | ภาพ Rich Menu ที่เจ้าของเลือก 1526×1031 px ต่ำกว่า 1 MB |
+| `scripts/line_rich_menu.py` | สร้าง JSON offline และติดตั้ง/คืน API default หลังอนุมัติ พร้อม rollback record |
+| `app.py`: `/api/settings`, `/api/line/rich-menu` | อ่าน/บันทึกค่าคุณครูผ่าน auth/CSRF/R2 เดิม และอ่านนิยามเมนู |
+| `database.py`: `teacher_settings` | การตั้งค่าร่วมทั้ง Vault + เวลา/ผู้แก้ไข; migration schema 4 |
+| `static/index.html`, `static/app.js`, `static/styles.css` | หน้าตั้งค่า `?view=settings`, deep links เปิดสมุดเบิกจ่าย/แฟ้มเด็ก และตัวจำลองเมนูตามภาพ |
+| `tests/test_rich_menu_settings.py`, `tests/test_frontend_auth.mjs` | ทดสอบเมนูครบ 8, ค่าเริ่มต้นทุกช่องทาง, validation/auth/CSRF, R2 rollback/restore, migration และหน้าตั้งค่า |
+| `docs/rich-menu.md` | พฤติกรรมแต่ละปุ่ม ขั้นตอนเปิดใช้/ย้อนกลับ และข้อจำกัด schema 4 |
+| `docs/qa/2026-11-15-rich-menu-settings.md` | หลักฐานตรวจในเครื่องและข้อจำกัดก่อน release |
 
 ## 3. โมเดล OCR และ Runtime (`model/`)
 

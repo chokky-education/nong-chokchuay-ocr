@@ -486,7 +486,8 @@ class NongChokChuayTests(unittest.TestCase):
                     self.assertEqual(payload["card_view"]["kind"], kind)
                     self.assertEqual(reply.call_args.args[1][0]["type"], "flex")
                     self._assert_valid_line_messages(reply.call_args.args[1])
-            self.assertEqual(read.call_count, len(cases))
+            # Each event reads shared preferences and card data under the coordinator lock.
+            self.assertEqual(read.call_count, 2 * len(cases))
             external_post.assert_not_called()
 
     def test_natural_card_routing_preserves_explicit_search_and_ai_writing(self):
