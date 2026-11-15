@@ -7,7 +7,8 @@ from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 import requests
 
 import database
-from config import AppConfig
+from config import AppConfig, DEFAULT_GEMINI_MODEL, resolve_llm_provider_and_model
+from extractor import extract_gemini_text
 from storage_service import VaultStorageCoordinator
 
 DEFAULT_TEACHER_NAME = "ครูพิ้งกี้"
@@ -42,18 +43,26 @@ def _resolve_teacher_name(
 
 
 def build_nong_chok_system_instruction(teacher_name: str = DEFAULT_TEACHER_NAME) -> str:
-    """Build Gemini Flash systemInstruction ensuring Nong Chok addresses the teacher by name."""
+    """Build natural Thai kindergarten teacher sidekick systemInstruction for Nong ChokChuay."""
     target = (teacher_name or DEFAULT_TEACHER_NAME).strip() or DEFAULT_TEACHER_NAME
     return (
-        f'คุณคือ "น้องโชคช่วย" (แทนตัวเองว่า "น้องโชค" เสมอ) ผู้ช่วยส่วนตัวแสนอบอุ่น ฉลาด รอบคอบ และสุภาพ '
-        f'ประจำห้องเรียนอนุบาลของ "{target}"\n'
-        f"กฎสำคัญที่สุด:\n"
-        f'1. ในทุกข้อความที่ตอบกลับ ต้องเรียกชื่อคุณครูว่า "{target}" เสมอ (เช่น "สวัสดีครับ{target}", "ได้เลยครับ{target}") '
-        f'ห้ามเรียกแค่ "คุณครู" โดยไม่มีคำว่า "{target}"\n'
-        f'2. ใช้คำลงท้ายสุภาพว่า "ครับ" และน้ำเสียงเป็นกันเอง คอยช่วยเหลือและให้กำลังใจ\n'
-        f"3. ตอบคำถาม สรุปเอกสาร ยอดเงินสำรองจ่ายรอเบิกคืน และข้อมูลเด็กแพ้อาหารโดยอ้างอิงจาก CONTEXT ของระบบเท่านั้น "
-        f"ห้ามแต่งตัวเลข ชื่อเด็ก หรือชื่อเอกสารขึ้นมาเอง หากใน CONTEXT ยังไม่มีข้อมูลให้แจ้ง{target}ตรงๆ อย่างสุภาพ\n"
-        f"4. ตอบให้กระชับ อ่านง่ายบนหน้าจอมือถือ LINE ไม่เกิน 4-6 บรรทัด"
+        f'คุณคือ "น้องโชค" (จากระบบน้องโชคช่วย) ผู้ช่วยครูรุ่นน้องคู่ใจประจำห้องอนุบาลของ "{target}"\n'
+        "บุคลิกของคุณคือลูกมือที่คล่องแคล่ว อบอุ่น ช่างสังเกต เข้าใจธรรมชาติเด็กปฐมวัย (3-6 ขวบ) "
+        "และเข้าใจดีว่างานครูอนุบาลไทยยุ่งแค่ไหน ทั้งดูแลเด็กหน้าห้อง เตรียมสื่อ ประเมินพัฒนาการ 4 ด้าน "
+        "ทำบิลเบิกโรงเรียน และคอยตอบ LINE ผู้ปกครอง\n\n"
+        "แนวทางการคุยใน LINE:\n"
+        '- คุยเป็นภาษาไทยธรรมชาติเหมือนผู้ช่วยรุ่นน้องคุยกับครูพี่เลี้ยง แทนตัวเองว่า "น้องโชค" '
+        'และใช้หางเสียงนุ่มนวลหลากหลายตามจังหวะประโยค เช่น "ครับ", "นะครับ", "ได้เลยครับ"\n'
+        f'- ห้ามขึ้นต้นด้วย "สวัสดีครับ{target}" ซ้ำๆ ทุกข้อความ ให้ทักสวัสดีเฉพาะตอนที่ครูทักทายเปิดบทสนทนาเท่านั้น '
+        f'นอกนั้นตอบเข้าประเด็นอย่างเป็นกันเอง และเรียกชื่อ "{target}" แทรกตามจังหวะธรรมชาติ\n'
+        "- หากครูถามเรื่องยอดเงินสำรองจ่าย เอกสารในตู้เซฟ รายชื่อเด็ก หรือข้อมูลแพ้อาหาร/โรคประจำตัว "
+        "ต้องยึดข้อมูลจาก CONTEXT เท่านั้น ห้ามเดาหรือแต่งตัวเลขและชื่อเด็กขึ้นเองเด็ดขาด "
+        "(เรื่องแพ้อาหารต้องระบุให้ชัดและช่วยเตือนความเสี่ยงเสมอ) ถ้ายังไม่มีข้อมูลในระบบ "
+        "ให้บอกตรงๆ อย่างนุ่มนวลและแนะให้ส่งรูปบิลหรือใบสมัครเข้ามาในแชทได้\n"
+        "- หากครูชวนคุย ระบายความเหนื่อย ขอให้ช่วยร่างข้อความแจ้งผู้ปกครองในกลุ่ม LINE "
+        "หรือขอไอเดียกิจกรรม นิทาน เพลงสั้นๆ สำหรับเด็กอนุบาล ให้ช่วยคิดและเกลาคำพูดอย่างเข้าใจหัวอกครูได้ทันทีโดยไม่ต้องจำกัดแค่ใน CONTEXT\n"
+        "- จัดข้อความสั้นกระชับ อ่านกวาดตาบนจอมือถือได้ในไม่กี่วินาที (ประมาณ 2-5 บรรทัด) "
+        "และห้ามใช้ศัพท์เทคนิคอย่างคำว่า CONTEXT, OCR, ฐานข้อมูล หรือระบบ AI"
     )
 
 
@@ -108,7 +117,7 @@ def generate_nong_chok_ai_reply(
     """Generate a warm Gemini Flash reply using Nong Chok's systemInstruction."""
     if config is None:
         return None
-    provider = (config.llm_provider or "gemini").strip().lower()
+    provider, model = resolve_llm_provider_and_model(config.llm_provider, config.llm_model)
     api_key = (config.llm_api_key or "").strip()
     if not api_key and not (provider != "gemini" and (config.llm_base_url or "").strip()):
         return None
@@ -120,7 +129,6 @@ def generate_nong_chok_ai_reply(
     try:
         if provider == "gemini":
             base = (config.llm_base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
-            model = (config.llm_model or "gemini-2.5-flash").strip()
             url = f"{base}/models/{model}:generateContent"
             resp = requests.post(
                 url,
@@ -129,15 +137,15 @@ def generate_nong_chok_ai_reply(
                     "systemInstruction": {"parts": [{"text": system_instruction}]},
                     "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
                     "generationConfig": {
-                        "temperature": 0.35,
-                        "maxOutputTokens": 450,
+                        "temperature": 0.65,
+                        "maxOutputTokens": 2048,
                     },
                 },
-                timeout=12,
+                timeout=20,
             )
             resp.raise_for_status()
             payload = resp.json()
-            reply = payload["candidates"][0]["content"]["parts"][0]["text"].strip()
+            reply = extract_gemini_text(payload).strip()
         else:
             base = (config.llm_base_url or "https://api.openai.com/v1").rstrip("/")
             url = f"{base}/chat/completions"
@@ -148,14 +156,14 @@ def generate_nong_chok_ai_reply(
                 url,
                 headers=headers,
                 json={
-                    "model": (config.llm_model or "gpt-4o-mini").strip(),
-                    "temperature": 0.35,
+                    "model": model,
+                    "temperature": 0.65,
                     "messages": [
                         {"role": "system", "content": system_instruction},
                         {"role": "user", "content": user_prompt},
                     ],
                 },
-                timeout=12,
+                timeout=20,
             )
             resp.raise_for_status()
             payload = resp.json()
@@ -166,8 +174,6 @@ def generate_nong_chok_ai_reply(
 
     if not reply:
         return None
-    if target_teacher not in reply:
-        reply = f"สวัสดีครับ{target_teacher}!\n{reply}"
     return reply[:1800]
 
 
@@ -532,9 +538,14 @@ def process_line_text_command(
             teacher_name=target_teacher,
         )
         if ai_reply:
+            resolved_model = (
+                resolve_llm_provider_and_model(config.llm_provider, config.llm_model)[1]
+                if config
+                else DEFAULT_GEMINI_MODEL
+            )
             return {
                 "intent": "ai_chat",
-                "model": config.llm_model if config else "gemini-2.5-flash",
+                "model": resolved_model,
                 "reply_text": ai_reply,
                 "line_messages": [{"type": "text", "text": ai_reply}],
                 "actions": [],

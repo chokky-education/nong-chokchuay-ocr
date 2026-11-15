@@ -261,6 +261,8 @@ test('buildContainerEnv forces AUTH_REQUIRED=true and APP_ENV=production', () =>
   assert.equal(envOut.LINE_ALLOW_GROUP_CHATS, 'false');
   assert.equal(envOut.R2_REQUIRED, 'false');
   assert.equal(envOut.R2_GATEWAY_URL, '');
+  assert.equal(envOut.LLM_PROVIDER, 'gemini');
+  assert.equal(envOut.LLM_MODEL, 'gemini-4-hydrogen');
 
   const envWithR2 = workerMod.buildContainerEnv({
     VAULT_BUCKET: {},
@@ -271,6 +273,22 @@ test('buildContainerEnv forces AUTH_REQUIRED=true and APP_ENV=production', () =>
   assert.equal(envWithR2.R2_REQUIRED, 'true');
   assert.equal(envWithR2.R2_BOOTSTRAP_IF_EMPTY, 'true');
   assert.equal(envWithR2.SNAPSHOT_RETENTION_COUNT, '7');
+
+  const blankModelOut = workerMod.buildContainerEnv({ LLM_PROVIDER: '   ', LLM_MODEL: '   ' });
+  assert.equal(blankModelOut.LLM_PROVIDER, 'gemini');
+  assert.equal(blankModelOut.LLM_MODEL, 'gemini-4-hydrogen');
+
+  const openaiBlankModelOut = workerMod.buildContainerEnv({ LLM_PROVIDER: 'openai', LLM_MODEL: '   ' });
+  assert.equal(openaiBlankModelOut.LLM_PROVIDER, 'openai');
+  assert.equal(openaiBlankModelOut.LLM_MODEL, 'gpt-4o-mini');
+});
+
+test('computeConfigFingerprint changes when LLM_MODEL changes', async () => {
+  const fpOld = await workerMod.computeConfigFingerprint(
+    workerMod.buildContainerEnv({ LLM_MODEL: 'gemini-2.5-flash' }),
+  );
+  const fpDefault = await workerMod.computeConfigFingerprint(workerMod.buildContainerEnv({}));
+  assert.notEqual(fpOld, fpDefault);
 });
 
 test('Worker uses singleton DO, forwards proto/host, reuses warm container, and restarts on secret rotation', async () => {

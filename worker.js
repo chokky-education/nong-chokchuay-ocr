@@ -57,6 +57,9 @@ async function timingSafeEqualNonEmpty(a, b) {
  */
 export function buildContainerEnv(env = {}) {
   const hasBucket = Boolean(env.VAULT_BUCKET);
+  const llmProvider = String(env.LLM_PROVIDER ?? "").trim().toLowerCase() || "gemini";
+  const defaultLlmModel = llmProvider === "gemini" ? "gemini-4-hydrogen" : "gpt-4o-mini";
+  const llmModel = String(env.LLM_MODEL ?? "").trim() || defaultLlmModel;
   const containerEnv = {
     AUTO_EXTRACT_ON_INGEST: String(env.AUTO_EXTRACT_ON_INGEST || "true"),
     PUBLIC_BASE_URL: String(env.PUBLIC_BASE_URL || ""),
@@ -65,8 +68,8 @@ export function buildContainerEnv(env = {}) {
     LINE_CHANNEL_ACCESS_TOKEN: String(env.LINE_CHANNEL_ACCESS_TOKEN || ""),
     ALLOWED_LINE_USER_IDS: String(env.ALLOWED_LINE_USER_IDS || ""),
     LINE_ALLOW_GROUP_CHATS: String(env.LINE_ALLOW_GROUP_CHATS || "false"),
-    LLM_PROVIDER: String(env.LLM_PROVIDER || "gemini"),
-    LLM_MODEL: String(env.LLM_MODEL || "gemini-2.5-flash"),
+    LLM_PROVIDER: llmProvider,
+    LLM_MODEL: llmModel,
     LLM_API_KEY: String(env.LLM_API_KEY || ""),
     APP_ENV: "production",
     AUTH_REQUIRED: "true",
