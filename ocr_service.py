@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import io
 import os
 import time
@@ -11,6 +12,7 @@ from PIL import Image
 import database
 import extractor
 from config import AppConfig
+from storage_service import StorageUpload, VaultStorageCoordinator
 
 
 def image_to_base64(img: Image.Image, max_dimension: int = 1800) -> str:
@@ -27,9 +29,9 @@ def image_to_base64(img: Image.Image, max_dimension: int = 1800) -> str:
 
 def _safe_extension(filename: str, is_pdf: bool) -> str:
     _, ext = os.path.splitext(filename or "")
-    cleaned = "".join(ch for ch in ext.lower() if ch.isalnum() or ch == ".")
-    if cleaned and len(cleaned) <= 10:
-        return cleaned
+    body = "".join(ch for ch in ext.lower().lstrip(".") if ("a" <= ch <= "z") or ("0" <= ch <= "9"))
+    if 1 <= len(body) <= 10:
+        return f".{body}"
     return ".pdf" if is_pdf else ".png"
 
 
@@ -81,6 +83,7 @@ def apply_intelligence_to_document(
     *,
     force_expense: bool = False,
     force_student: bool = False,
+    r2_enabled: bool = False,
 ) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """Merge suggested metadata onto existing fields and persist Expense Record / Student Profile."""
     suggested_cat = intel.get("doc_category") or "general"
@@ -97,6 +100,7 @@ def apply_intelligence_to_document(
             category=suggested_cat if cat_changed else current_category,
             tags=merged_tags if tags_changed else normalized_current,
             db_path=db_path,
+            r2_enabled=r2_enabled,
         )
 
     expense_record = None
@@ -163,8 +167,17 @@ def ingest_document(
     auto_extract: Optional[bool] = None,
     review_status: str = "pending_review",
     line_user_id: str = "",
+    storage: Optional[VaultStorageCoordinator] = None,
+    operation_id: str = "",
 ) -> Dict[str, Any]:
     """Run OCR on image/PDF bytes and optionally persist Source File, Vault Document, Expense Record, and Student Profile."""
+    if save_to_db and storage is not None:
+        storage.require_ready()
+        if operation_id:
+            existing_op = storage.get_committed_operation(operation_id)
+            if existing_op is not None:
+                return existing_op
+
     lower_name = (filename or "unknown").lower()
     is_pdf = lower_name.endswith(".pdf") or content_type == "application/pdf"
     file_size = len(contents)
@@ -234,8 +247,133 @@ def ingest_document(
     student_record: Optional[Dict[str, Any]] = None
     should_auto_extract = config.auto_extract_on_ingest if auto_extract is None else auto_extract
 
+    def _build_result(
+        *,
+        result_doc_id: Optional[str],
+        has_source_file: bool,
+        result_category: str,
+        result_tags: List[str],
+        result_expense: Optional[Dict[str, Any]],
+        result_student: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        return {
+            "success": True,
+            "doc_id": result_doc_id,
+            "filename": filename,
+            "is_pdf": is_pdf,
+            "total_pages": total_pages,
+            "current_page": page if not process_all_pages else 1,
+            "processed_pages_count": len(images),
+            "text": full_text,
+            "lines": all_lines,
+            "image_preview": first_img_b64,
+            "image_width": orig_w,
+            "image_height": orig_h,
+            "has_source_file": has_source_file,
+            "category": result_category,
+            "tags": result_tags,
+            "ingestion_channel": ingestion_channel,
+            "doc_date": doc_date,
+            "review_status": review_status,
+            "line_user_id": line_user_id,
+            "auto_extract": bool(should_auto_extract),
+            "expense": result_expense,
+            "student": result_student,
+            "stats": {
+                "duration_ms": total_duration_ms,
+                "avg_ms_per_page": round(total_duration_ms / max(1, len(images)), 1),
+                "total_lines": len(all_lines),
+                "avg_confidence": avg_conf,
+                "rotation": all_page_results[0]["rotation"] if all_page_results else 0,
+                "text_angle": all_page_results[0]["text_angle"] if all_page_results else 0.0,
+            },
+            "page_details": all_page_results,
+        }
+
     if save_to_db:
         doc_id = str(uuid.uuid4())
+        ext = _safe_extension(filename, is_pdf)
+        storage_key = f"{doc_id}{ext}"
+        source_sha256 = hashlib.sha256(contents).hexdigest()
+        source_path = os.path.join(config.uploads_dir, storage_key)
+
+        intel: Optional[Dict[str, Any]] = None
+        if should_auto_extract and full_text:
+            try:
+                intel = extractor.extract_document_intelligence(
+                    full_text, config, extraction_method="auto", require_expense_hint=True
+                )
+            except Exception as exc:
+                print(f"[OCR] Auto-extract skipped for {doc_id}: {exc}")
+
+        if storage is not None:
+            r2_enabled = config.is_r2_enabled()
+
+            def _persist_with_storage(_rev: int) -> Dict[str, Any]:
+                local_cat = clean_category
+                local_tags = list(clean_tags)
+                local_expense: Optional[Dict[str, Any]] = None
+                local_student: Optional[Dict[str, Any]] = None
+                database.save_document(
+                    doc_id=doc_id,
+                    filename=filename or "uploaded_doc",
+                    file_type="pdf" if is_pdf else "image",
+                    text_content=full_text,
+                    lines=all_lines,
+                    avg_confidence=avg_conf,
+                    duration_ms=total_duration_ms,
+                    total_pages=total_pages if (is_pdf and process_all_pages) else 1,
+                    image_preview=first_img_b64,
+                    file_size=file_size,
+                    source_path=source_path,
+                    source_storage_key=storage_key,
+                    source_sha256=source_sha256,
+                    category=local_cat,
+                    tags=local_tags,
+                    ingestion_channel=ingestion_channel,
+                    doc_date=doc_date,
+                    image_width=orig_w,
+                    image_height=orig_h,
+                    review_status=review_status,
+                    line_user_id=line_user_id,
+                    db_path=config.db_path,
+                )
+                if intel is not None:
+                    updated_doc, local_expense, local_student = apply_intelligence_to_document(
+                        doc_id,
+                        local_cat,
+                        local_tags,
+                        intel,
+                        db_path=config.db_path,
+                        force_expense=False,
+                        force_student=False,
+                        r2_enabled=r2_enabled,
+                    )
+                    if updated_doc:
+                        local_cat = updated_doc["category"]
+                        local_tags = updated_doc["tags"]
+                return _build_result(
+                    result_doc_id=doc_id,
+                    has_source_file=True,
+                    result_category=local_cat,
+                    result_tags=local_tags,
+                    result_expense=local_expense,
+                    result_student=local_student,
+                )
+
+            upload_mime = content_type or ("application/pdf" if is_pdf else "image/png")
+            return storage.execute_mutation(
+                operation_id,
+                "ingest_document",
+                _persist_with_storage,
+                new_upload=StorageUpload(
+                    storage_key=storage_key,
+                    contents=contents,
+                    sha256=source_sha256,
+                    content_type=upload_mime,
+                ),
+            )
+
         source_path = _persist_source_file(contents, doc_id, filename, is_pdf, config.uploads_dir)
         try:
             database.save_document(
@@ -250,6 +388,8 @@ def ingest_document(
                 image_preview=first_img_b64,
                 file_size=file_size,
                 source_path=source_path,
+                source_storage_key=storage_key,
+                source_sha256=source_sha256,
                 category=clean_category,
                 tags=clean_tags,
                 ingestion_channel=ingestion_channel,
@@ -265,11 +405,8 @@ def ingest_document(
                 os.remove(source_path)
             raise
 
-        if should_auto_extract and full_text:
+        if intel is not None:
             try:
-                intel = extractor.extract_document_intelligence(
-                    full_text, config, extraction_method="auto", require_expense_hint=True
-                )
                 updated_doc, expense_record, student_record = apply_intelligence_to_document(
                     doc_id,
                     clean_category,
@@ -278,6 +415,7 @@ def ingest_document(
                     db_path=config.db_path,
                     force_expense=False,
                     force_student=False,
+                    r2_enabled=config.is_r2_enabled(),
                 )
                 if updated_doc:
                     clean_category = updated_doc["category"]
@@ -285,36 +423,11 @@ def ingest_document(
             except Exception as exc:
                 print(f"[OCR] Auto-extract skipped for {doc_id}: {exc}")
 
-    return {
-        "success": True,
-        "doc_id": doc_id,
-        "filename": filename,
-        "is_pdf": is_pdf,
-        "total_pages": total_pages,
-        "current_page": page if not process_all_pages else 1,
-        "processed_pages_count": len(images),
-        "text": full_text,
-        "lines": all_lines,
-        "image_preview": first_img_b64,
-        "image_width": orig_w,
-        "image_height": orig_h,
-        "has_source_file": bool(source_path and os.path.exists(source_path)),
-        "category": clean_category,
-        "tags": clean_tags,
-        "ingestion_channel": ingestion_channel,
-        "doc_date": doc_date,
-        "review_status": review_status,
-        "line_user_id": line_user_id,
-        "auto_extract": bool(should_auto_extract),
-        "expense": expense_record,
-        "student": student_record,
-        "stats": {
-            "duration_ms": total_duration_ms,
-            "avg_ms_per_page": round(total_duration_ms / max(1, len(images)), 1),
-            "total_lines": len(all_lines),
-            "avg_confidence": avg_conf,
-            "rotation": all_page_results[0]["rotation"] if all_page_results else 0,
-            "text_angle": all_page_results[0]["text_angle"] if all_page_results else 0.0,
-        },
-        "page_details": all_page_results,
-    }
+    return _build_result(
+        result_doc_id=doc_id,
+        has_source_file=bool(source_path and os.path.exists(source_path)),
+        result_category=clean_category,
+        result_tags=clean_tags,
+        result_expense=expense_record,
+        result_student=student_record,
+    )

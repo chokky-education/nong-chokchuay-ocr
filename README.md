@@ -13,7 +13,7 @@
 - [4. สถาปัตยกรรมฐานข้อมูลและการค้นหา (Database & Full-Text Search)](#4-สถาปัตยกรรมฐานข้อมูลและการค้นหา-database--full-text-search)
 - [5. รายละเอียด REST API (API Reference)](#5-รายละเอียด-rest-api-api-reference)
 - [6. พิมพ์เขียวสำหรับการต่อยอดเป็น Digital Product (Product Blueprints)](#6-พิมพ์เขียวสำหรับการต่อยอดเป็น-digital-product-product-blueprints)
-- [7. การนำไปขึ้นเซิร์ฟเวอร์และการ Deploy ด้วย Docker & Cloudflare ($5/เดือน)](#7-การนำไปขึ้นเซิร์ฟเวอร์และการ-deploy-ด้วย-docker--cloudflare-5เดือน)
+- [7. การนำไปขึ้นเซิร์ฟเวอร์และการ Deploy ด้วย Docker & Cloudflare Workers Paid](#7-การนำไปขึ้นเซิร์ฟเวอร์และการ-deploy-ด้วย-docker--cloudflare-workers-paid)
 - [8. ประสิทธิภาพและข้อกำหนดทรัพยากร (Performance & Benchmarks)](#8-ประสิทธิภาพและข้อกำหนดทรัพยากร-performance--benchmarks)
 - [9. ลิขสิทธิ์และการอ้างอิง (License & Attributions)](#9-ลิขสิทธิ์และการอ้างอิง-license--attributions)
 
@@ -35,7 +35,7 @@
 ```
 
 ### จุดเด่นสำหรับคุณครูอนุบาล & LINE OA SaaS
-- **ส่งงานผ่าน LINE OA ตอบกลับฟรี (`replyToken`):** รองรับ Webhook (`/api/line/webhook`) ตรวจสอบลายเซ็น `X-Line-Signature`, ตอบกลับเป็น Flex Card กด "✅ ยืนยันตรวจแล้ว" หรือ "💸 เบิกเงินคืนแล้ว" และค้นหาในแชทด้วยคำสั่ง `"ยอดรอเบิก"`, `"แพ้อาหาร"`, หรือคำค้นเอกสาร พร้อมตัวจำลองแชท LINE บนหน้าเว็บ (`/api/line/simulate`)
+- **ส่งงานผ่าน LINE OA ตอบกลับฟรี (`replyToken`):** รองรับ Webhook (`/api/line/webhook`) ตรวจสอบลายเซ็น `X-Line-Signature`, ตอบกลับเป็น Flex Card กด "✅ ยืนยันตรวจแล้ว" หรือ "💸 เบิกเงินคืนแล้ว" และค้นหาในแชทด้วยคำสั่ง `"ยอดรอเบิก"`, `"แพ้อาหาร"`, หรือคำค้นเอกสาร พร้อมตัวจำลองแชท LINE บนหน้าเว็บ (`/api/line/simulate`) (LINE ระบุให้ใช้ `replyToken` เพียงครั้งเดียว **ภายใน 1 นาที** และควรตอบกลับให้เร็วที่สุด)
 - **แฟ้มทะเบียนเด็ก & แจ้งเตือนแพ้อาหาร:** สกัดชื่อ-นามสกุล, ชื่อเล่น, เลขบัตร 13 หลัก, วันเกิด (แปลง พ.ศ.→ค.ศ.), ห้องเรียน, เบอร์ผู้ปกครอง, ประวัติแพ้อาหาร และโรคประจำตัวจากใบสมัคร/สูติบัตรอัตโนมัติ (แบบ Offline Regex หรือ Hybrid Text LLM)
 - **สมุดเบิกจ่ายเงินสำรองจ่าย:** แยกรายจ่าย `pending_reimbursement` (รอเบิกคืนโรงเรียน), `reimbursed` (เบิกคืนแล้ว), และ `personal` (ส่วนตัว) พร้อม Dashboard KPI และ Export CSV (UTF-8 BOM)
 - **ความปลอดภัย (Privacy-first):** ประมวลผลภาพบนเซิร์ฟเวอร์ตัวเอง 100% เก็บไฟล์ต้นฉบับใน `data/uploads/` และต่อให้เปิด LLM เสริม ก็ส่งเฉพาะข้อความ Text ที่อ่านได้เท่านั้น
@@ -58,6 +58,7 @@ openthai-ocr-app/
 ├── database.py                 # SQLite ORM, Schema Migration, Trigram FTS5 และตาราง expenses
 ├── ocr_engine.py               # OpenThai 2.0 ONNX OCR Inference Engine + Geometry alignment
 ├── ocr_service.py              # Ingestion Pipeline กลาง (Source File Storage + OCR + Auto-extract)
+├── storage_service.py          # R2 Durable Storage Coordinator (Startup Restore Gate, Lock, Rollback, Conditional ETag)
 ├── watcher.py                  # Background Polling Watch Folder (data/inbox/ -> Vault / inbox_failed)
 ├── extractor.py                # Offline Thai Regex Receipt Extractor + Optional Text-only LLM Adapter
 ├── AGENTS.md                   # คู่มือรันและทดสอบสำหรับ Agent & Developer
@@ -285,9 +286,9 @@ ORDER BY d.created_at DESC;
 
 ---
 
-## 7. การนำไปขึ้นเซิร์ฟเวอร์และการ Deploy ด้วย Docker & Cloudflare ($5/เดือน)
+## 7. การนำไปขึ้นเซิร์ฟเวอร์และการ Deploy ด้วย Docker & Cloudflare Workers Paid
 
-โปรเจกต์มี `Dockerfile` และ `wrangler.toml` พร้อมใช้งาน คุณสามารถ Build และนำไปรันบน **Cloudflare Workers Paid ($5/เดือน) + Cloudflare Containers** (ตั้งค่า `sleepAfter = "3m"` ปิดเครื่องอัตโนมัติเมื่อไม่มีการใช้งานเพื่อให้ RAM ~400-500 MB อยู่ในโควตา $5/เดือน) หรือ VPS / AWS EC2 / Cloud Container Platform ได้ทันที:
+โปรเจกต์มี `Dockerfile` และ `wrangler.toml` พร้อมใช้งาน รองรับทั้ง Docker ในเครื่อง/VPS และ **Cloudflare Workers Paid (ค่าพื้นฐาน $5/เดือน พร้อมโควตาในตัว + R2 free tier 10 GB-month, 1M Class A writes, 10M Class B reads; ไม่ใช่เพดานค่าใช้จ่ายสูงสุดหากใช้งานเกินโควตา)** + Cloudflare Containers (`sleepAfter = "3m"`, `max_instances = 1`) + Private R2 Bucket (`VAULT_BUCKET` / `nong-chokchuay-vault`, ดูรายละเอียดใน `docs/adr/0003-cloudflare-r2-sqlite-persistence.md`):
 
 ```bash
 # 1. Build & Run แบบ Docker
@@ -299,13 +300,18 @@ docker run -d \
   --restart unless-stopped \
   nong-chokchuay-ocr
 
-# 2. ตั้งค่า LINE OA & Deploy ขึ้น Cloudflare Workers Paid ($5/mo)
+# 2. สร้าง private R2 bucket (ครั้งแรกครั้งเดียว, ห้ามเปิด Public Access)
+npx wrangler r2 bucket create nong-chokchuay-vault
+
+# 3. ตั้งค่า Secrets และ Deploy ขึ้น Cloudflare (Bootstrap ครั้งแรกชั่วคราว)
 npx wrangler secret put LINE_CHANNEL_SECRET
 npx wrangler secret put LINE_CHANNEL_ACCESS_TOKEN
-npx wrangler deploy
+npx wrangler deploy --var R2_BOOTSTRAP_IF_EMPTY:true
+# เปิด /api/health หรือหน้าเว็บ 1 ครั้งเพื่อสร้าง snapshot แรก แล้วล็อกกลับ:
+npx wrangler deploy --var R2_BOOTSTRAP_IF_EMPTY:false
 ```
 
-> **การตั้งค่า LINE Developers Webhook URL:** นำ URL ที่ได้ (เช่น `https://nong-chokchuay-ocr.entrace-space.workers.dev/api/line/webhook`) ไปวางใน LINE Official Account Messaging API และเปิด Use Webhook (ข้อความตอบกลับผ่าน `replyToken` ฟรีไม่จำกัดจำนวน)
+> **การตั้งค่า LINE Developers Webhook URL:** นำ URL ที่ได้ (เช่น `https://nong-chokchuay-ocr.entrace-space.workers.dev/api/line/webhook`) ไปวางใน LINE Official Account Messaging API และเปิด Use Webhook (LINE ระบุให้ใช้ `replyToken` เพียงครั้งเดียว **ภายใน 1 นาที** และควรตอบกลับให้เร็วที่สุด)
 
 ---
 

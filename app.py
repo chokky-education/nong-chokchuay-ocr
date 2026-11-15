@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import io
 import json
 import os
@@ -25,8 +26,10 @@ import database
 import extractor
 import line_service
 import ocr_service
+import storage_service
 from config import AppConfig
 from runtime.line_engine import LineOCR
+from storage_service import R2ClientProtocol, VaultStorageCoordinator
 from watcher import InboxWatcher
 
 
@@ -86,17 +89,20 @@ def create_app(
     config: Optional[AppConfig] = None,
     engine_factory: Optional[Callable[[], Any]] = None,
     static_dir: Optional[str] = None,
+    storage_client: Optional[R2ClientProtocol] = None,
 ) -> FastAPI:
     cfg = config or AppConfig.from_env()
     factory = engine_factory or _default_engine_factory
+    storage = VaultStorageCoordinator(cfg, client=storage_client)
 
     @asynccontextmanager
     async def lifespan(fastapi_app: FastAPI):
         cfg.ensure_dirs()
-        database.init_db(cfg.db_path)
+        fastapi_app.state.storage.startup()
         if fastapi_app.state.engine is None:
             fastapi_app.state.engine = factory()
-        fastapi_app.state.watcher.start()
+        if fastapi_app.state.storage.state == "READY":
+            fastapi_app.state.watcher.start()
         try:
             yield
         finally:
@@ -106,6 +112,7 @@ def create_app(
     application.state.config = cfg
     application.state.engine_factory = factory
     application.state.engine = None
+    application.state.storage = storage
 
     def get_engine() -> Any:
         if application.state.engine is None:
@@ -113,7 +120,19 @@ def create_app(
         return application.state.engine
 
     application.state.get_engine = get_engine
-    application.state.watcher = InboxWatcher(config=cfg, engine_getter=get_engine)
+    application.state.watcher = InboxWatcher(config=cfg, engine_getter=get_engine, storage=storage)
+
+    @application.exception_handler(storage_service.StorageError)
+    async def storage_error_handler(request: Request, exc: storage_service.StorageError):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "success": False,
+                "detail": str(exc),
+                "error": exc.error_code,
+                "storage_state": storage.state,
+            },
+        )
 
     _PUBLIC_PATHS = {
         "/",
@@ -132,14 +151,35 @@ def create_app(
 
     @application.middleware("http")
     async def auth_and_csrf_middleware(request: Request, call_next):
-        if not cfg.auth_required or request.method == "OPTIONS":
+        if request.method == "OPTIONS":
             return await call_next(request)
 
         raw_path = request.url.path or "/"
         if ".." in raw_path.split("/"):
-            return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+            if cfg.auth_required:
+                return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+            return JSONResponse(status_code=400, content={"detail": "Invalid path"})
 
         norm_path = posixpath.normpath(raw_path)
+        is_storage_exempt = (
+            norm_path == "/"
+            or norm_path == "/api/health"
+            or norm_path.startswith("/static/")
+        )
+        if not is_storage_exempt and storage.state != "READY":
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "success": False,
+                    "detail": "Vault storage is not ready",
+                    "error": storage.error_code or "storage_unavailable",
+                    "storage_state": storage.state,
+                },
+            )
+
+        if not cfg.auth_required:
+            return await call_next(request)
+
         if (
             norm_path in _PUBLIC_PATHS
             or norm_path in _PUBLIC_STATIC_PATHS
@@ -169,14 +209,19 @@ def create_app(
 
     @application.get("/api/health")
     def get_health():
-        return {
-            "status": "ok",
+        is_error = storage.state == "ERROR"
+        payload = {
+            "status": "error" if is_error else "ok",
             "brand": "น้องโชคช่วย (Nong ChokChuay)",
             "auth_required": cfg.auth_required,
             "oauth_configured": auth_service.is_oauth_configured(cfg),
             "line_oa_configured": bool(cfg.line_channel_secret and cfg.line_channel_access_token),
             "line_allowlist_configured": bool(cfg.allowed_line_user_ids),
+            "storage_state": storage.state,
+            "storage_revision": storage.current_revision,
+            "busy": bool(storage.is_busy or application.state.watcher.is_scanning),
         }
+        return JSONResponse(status_code=503 if is_error else 200, content=payload)
 
     @application.get("/api/auth/me")
     def get_auth_me(request: Request):
@@ -253,17 +298,19 @@ def create_app(
             email=email,
             name=str(userinfo.get("name") or ""),
             picture=str(userinfo.get("picture") or ""),
+            storage=storage,
         )
         return resp
 
     @application.post("/api/auth/logout")
     def auth_logout(request: Request):
         resp = JSONResponse({"success": True})
-        auth_service.revoke_login_session(resp, request, cfg)
+        auth_service.revoke_login_session(resp, request, cfg, storage=storage)
         return resp
 
     @application.get("/api/system")
     def get_system_info():
+        storage.require_ready()
         db_stats = database.get_db_stats(db_path=cfg.db_path)
         return {
             "brand": "น้องโชคช่วย (Nong ChokChuay)",
@@ -343,6 +390,7 @@ def create_app(
             save_to_db=True,
             ingestion_channel="web_upload",
             auto_extract=True,
+            storage=storage,
         )
         return JSONResponse(result)
 
@@ -356,6 +404,8 @@ def create_app(
         limit: int = 50,
         offset: int = 0,
     ):
+        storage.require_ready()
+        r2_enabled = cfg.is_r2_enabled()
         docs = database.search_documents(
             query=query,
             category=category,
@@ -364,6 +414,7 @@ def create_app(
             limit=limit,
             offset=offset,
             db_path=cfg.db_path,
+            r2_enabled=r2_enabled,
         )
         stats = database.get_db_stats(db_path=cfg.db_path)
         return {
@@ -379,76 +430,131 @@ def create_app(
 
     @application.get("/api/documents/{doc_id}")
     def get_document(doc_id: str):
-        doc = database.get_document_by_id(doc_id, db_path=cfg.db_path)
+        storage.require_ready()
+        doc = database.get_document_by_id(
+            doc_id, db_path=cfg.db_path, r2_enabled=cfg.is_r2_enabled()
+        )
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
         return {"success": True, "document": doc}
 
     @application.get("/api/documents/{doc_id}/file")
     def download_document_source(doc_id: str):
-        doc = database.get_document_by_id(doc_id, db_path=cfg.db_path)
+        storage.require_ready()
+        doc = database.get_document_by_id(
+            doc_id, db_path=cfg.db_path, r2_enabled=cfg.is_r2_enabled()
+        )
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
-        src_path = doc.get("source_path") or ""
-        if not src_path or not os.path.exists(src_path):
+        try:
+            src_path = storage.ensure_local_source_file(doc)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Source file not found")
+        except ValueError:
             raise HTTPException(status_code=404, detail="Source file not found")
         return FileResponse(src_path, filename=doc.get("filename") or os.path.basename(src_path))
 
     @application.patch("/api/documents/{doc_id}")
     def update_document(doc_id: str, payload: DocumentUpdateRequest):
-        updated = database.update_document_metadata(
-            doc_id=doc_id,
-            text_content=payload.text,
-            category=payload.category,
-            tags=payload.tags,
-            doc_date=payload.doc_date,
-            review_status=payload.review_status,
-            db_path=cfg.db_path,
-        )
-        if not updated:
+        storage.require_ready()
+        r2_enabled = cfg.is_r2_enabled()
+        existing = database.get_document_by_id(doc_id, db_path=cfg.db_path, r2_enabled=r2_enabled)
+        if not existing:
             raise HTTPException(status_code=404, detail="Document not found")
-        return {"success": True, "document": updated}
+
+        def _do_update(_rev: int) -> Dict[str, Any]:
+            updated = database.update_document_metadata(
+                doc_id=doc_id,
+                text_content=payload.text,
+                category=payload.category,
+                tags=payload.tags,
+                doc_date=payload.doc_date,
+                review_status=payload.review_status,
+                db_path=cfg.db_path,
+                r2_enabled=r2_enabled,
+            )
+            return {"success": True, "doc_id": doc_id, "document": updated}
+
+        return storage.execute_mutation("", "update_document", _do_update)
 
     @application.post("/api/documents/{doc_id}/review")
     def review_document(doc_id: str, payload: Optional[DocumentReviewRequest] = Body(default=None)):
-        target_review = payload.review_status if payload else "reviewed"
-        updated = database.update_document_metadata(
-            doc_id=doc_id,
-            review_status=target_review,
-            db_path=cfg.db_path,
-        )
-        if not updated:
+        storage.require_ready()
+        r2_enabled = cfg.is_r2_enabled()
+        existing = database.get_document_by_id(doc_id, db_path=cfg.db_path, r2_enabled=r2_enabled)
+        if not existing:
             raise HTTPException(status_code=404, detail="Document not found")
-        if payload and payload.reimbursement_status and updated.get("expense"):
-            exp = updated["expense"]
-            updated_exp = database.upsert_expense(
-                document_id=doc_id,
-                merchant=exp["merchant"],
-                expense_date=exp["expense_date"],
-                subtotal=exp["subtotal"],
-                vat_amount=exp["vat_amount"],
-                total_amount=exp["total_amount"],
-                currency=exp["currency"],
-                expense_category=exp["expense_category"],
-                extraction_method=exp["extraction_method"],
-                reimbursement_status=payload.reimbursement_status,
-                budget_source=exp.get("budget_source"),
-                raw_json=exp.get("raw_json"),
+
+        target_review = payload.review_status if payload else "reviewed"
+
+        def _do_review(_rev: int) -> Dict[str, Any]:
+            updated = database.update_document_metadata(
+                doc_id=doc_id,
+                review_status=target_review,
                 db_path=cfg.db_path,
+                r2_enabled=r2_enabled,
             )
-            updated["expense"] = updated_exp
-        return {"success": True, "document": updated}
+            if payload and payload.reimbursement_status and updated and updated.get("expense"):
+                exp = updated["expense"]
+                updated_exp = database.upsert_expense(
+                    document_id=doc_id,
+                    merchant=exp["merchant"],
+                    expense_date=exp["expense_date"],
+                    subtotal=exp["subtotal"],
+                    vat_amount=exp["vat_amount"],
+                    total_amount=exp["total_amount"],
+                    currency=exp["currency"],
+                    expense_category=exp["expense_category"],
+                    extraction_method=exp["extraction_method"],
+                    reimbursement_status=payload.reimbursement_status,
+                    budget_source=exp.get("budget_source"),
+                    raw_json=exp.get("raw_json"),
+                    db_path=cfg.db_path,
+                )
+                updated["expense"] = updated_exp
+            return {"success": True, "doc_id": doc_id, "document": updated}
+
+        return storage.execute_mutation("", "review_document", _do_review)
 
     @application.delete("/api/documents/{doc_id}")
     def delete_document(doc_id: str):
-        success = database.delete_document(doc_id, db_path=cfg.db_path)
-        return {"success": success, "deleted_id": doc_id}
+        storage.require_ready()
+        r2_enabled = cfg.is_r2_enabled()
+        existing = database.get_document_by_id(doc_id, db_path=cfg.db_path, r2_enabled=r2_enabled)
+        if not existing:
+            return {"success": False, "deleted_id": doc_id}
+
+        removed_paths: List[str] = []
+
+        def _do_delete(rev: int) -> Dict[str, Any]:
+            success = database.delete_document(
+                doc_id,
+                db_path=cfg.db_path,
+                defer_file_removal=r2_enabled,
+                deleted_in_revision=rev,
+                removed_paths_out=removed_paths,
+            )
+            return {"success": success, "deleted_id": doc_id, "doc_id": doc_id}
+
+        res = storage.execute_mutation(
+            "",
+            "delete_document",
+            _do_delete,
+            cleanup_local_paths_after_commit=removed_paths,
+        )
+        return {"success": bool(res.get("success")), "deleted_id": doc_id}
 
     @application.get("/api/database/download")
     def download_database():
+        storage.require_ready()
         if not os.path.exists(cfg.db_path):
             raise HTTPException(status_code=404, detail="Database file not found")
-        return FileResponse(cfg.db_path, filename="nong_chokchuay_vault.db", media_type="application/octet-stream")
+        download_path = (
+            storage.committed_db_path
+            if cfg.is_r2_enabled() and os.path.exists(storage.committed_db_path)
+            else cfg.db_path
+        )
+        return FileResponse(download_path, filename="nong_chokchuay_vault.db", media_type="application/octet-stream")
 
     @application.get("/api/watcher/status")
     def watcher_status():
@@ -456,13 +562,16 @@ def create_app(
 
     @application.post("/api/watcher/scan")
     def watcher_scan():
+        storage.require_ready()
         result = application.state.watcher.scan_once(require_stability=False)
         return {"success": True, **result}
 
     # Expense Extraction & Reporting Endpoints
     @application.post("/api/documents/{doc_id}/extract")
     def extract_document_expense(doc_id: str, extraction_method: str = Query("auto")):
-        doc = database.get_document_by_id(doc_id, db_path=cfg.db_path)
+        storage.require_ready()
+        r2_enabled = cfg.is_r2_enabled()
+        doc = database.get_document_by_id(doc_id, db_path=cfg.db_path, r2_enabled=r2_enabled)
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
 
@@ -472,15 +581,20 @@ def create_app(
             extraction_method=extraction_method,
             require_expense_hint=False,
         )
-        updated_doc, expense, student = ocr_service.apply_intelligence_to_document(
-            doc_id,
-            doc.get("category") or "general",
-            doc.get("tags") or [],
-            intel,
-            db_path=cfg.db_path,
-            force_expense=True,
-        )
-        return {"success": True, "expense": expense, "student": student, "document": updated_doc}
+
+        def _do_extract(_rev: int) -> Dict[str, Any]:
+            updated_doc, expense, student = ocr_service.apply_intelligence_to_document(
+                doc_id,
+                doc.get("category") or "general",
+                doc.get("tags") or [],
+                intel,
+                db_path=cfg.db_path,
+                force_expense=True,
+                r2_enabled=r2_enabled,
+            )
+            return {"success": True, "doc_id": doc_id, "expense": expense, "student": student, "document": updated_doc}
+
+        return storage.execute_mutation("", "extract_document", _do_extract)
 
     @application.get("/api/expenses")
     def list_expenses(
@@ -489,6 +603,7 @@ def create_app(
         tag: Optional[str] = Query(None),
         reimbursement_status: Optional[str] = Query(None),
     ):
+        storage.require_ready()
         data = database.list_expenses(
             month=month,
             expense_category=expense_category,
@@ -500,29 +615,52 @@ def create_app(
 
     @application.put("/api/expenses/{doc_id}")
     def update_expense(doc_id: str, payload: ExpenseUpsertRequest):
-        expense = database.upsert_expense(
-            document_id=doc_id,
-            merchant=payload.merchant,
-            expense_date=payload.expense_date,
-            subtotal=payload.subtotal,
-            vat_amount=payload.vat_amount,
-            total_amount=payload.total_amount,
-            currency=payload.currency,
-            expense_category=payload.expense_category,
-            extraction_method="manual",
-            reimbursement_status=payload.reimbursement_status,
-            budget_source=payload.budget_source,
-            raw_json=payload.model_dump(),
-            db_path=cfg.db_path,
+        storage.require_ready()
+        doc = database.get_document_by_id(
+            doc_id, db_path=cfg.db_path, r2_enabled=cfg.is_r2_enabled()
         )
-        if not expense:
+        if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
-        return {"success": True, "expense": expense}
+
+        def _do_upsert_expense(_rev: int) -> Dict[str, Any]:
+            expense = database.upsert_expense(
+                document_id=doc_id,
+                merchant=payload.merchant,
+                expense_date=payload.expense_date,
+                subtotal=payload.subtotal,
+                vat_amount=payload.vat_amount,
+                total_amount=payload.total_amount,
+                currency=payload.currency,
+                expense_category=payload.expense_category,
+                extraction_method="manual",
+                reimbursement_status=payload.reimbursement_status,
+                budget_source=payload.budget_source,
+                raw_json=payload.model_dump(),
+                db_path=cfg.db_path,
+            )
+            return {"success": True, "doc_id": doc_id, "expense": expense}
+
+        return storage.execute_mutation("", "upsert_expense", _do_upsert_expense)
 
     @application.delete("/api/expenses/{doc_id}")
     def delete_expense(doc_id: str):
-        deleted = database.delete_expense(doc_id, db_path=cfg.db_path)
-        return {"success": deleted, "document_id": doc_id}
+        storage.require_ready()
+        doc = database.get_document_by_id(
+            doc_id, db_path=cfg.db_path, r2_enabled=cfg.is_r2_enabled()
+        )
+        if not doc or not doc.get("expense"):
+            return {"success": False, "document_id": doc_id}
+
+        res = storage.execute_mutation(
+            "",
+            "delete_expense",
+            lambda _rev: {
+                "success": database.delete_expense(doc_id, db_path=cfg.db_path),
+                "document_id": doc_id,
+                "doc_id": doc_id,
+            },
+        )
+        return {"success": bool(res.get("success")), "document_id": doc_id}
 
     @application.get("/api/expenses/export.csv")
     def export_expenses_csv(
@@ -531,6 +669,7 @@ def create_app(
         tag: Optional[str] = Query(None),
         reimbursement_status: Optional[str] = Query(None),
     ):
+        storage.require_ready()
         data = database.list_expenses(
             month=month,
             expense_category=expense_category,
@@ -599,6 +738,7 @@ def create_app(
         classroom: Optional[str] = Query(None),
         has_allergy: Optional[bool] = Query(None),
     ):
+        storage.require_ready()
         data = database.list_students(
             query=query,
             classroom=classroom,
@@ -609,52 +749,78 @@ def create_app(
 
     @application.post("/api/students")
     def create_student(payload: StudentUpsertRequest):
-        student = database.upsert_student(
-            document_id=payload.document_id,
-            full_name=payload.full_name,
-            nickname=payload.nickname,
-            citizen_id=payload.citizen_id,
-            birth_date=payload.birth_date,
-            classroom=payload.classroom,
-            parent_name=payload.parent_name,
-            parent_phone=payload.parent_phone,
-            allergies=payload.allergies,
-            medical_notes=payload.medical_notes,
-            extraction_method="manual",
-            raw_json=payload.model_dump(),
-            db_path=cfg.db_path,
-        )
-        return {"success": True, "student": student}
+        storage.require_ready()
+        if payload.document_id:
+            doc = database.get_document_by_id(
+                payload.document_id, db_path=cfg.db_path, r2_enabled=cfg.is_r2_enabled()
+            )
+            if not doc:
+                raise HTTPException(status_code=404, detail="Document not found")
+
+        def _do_create_student(_rev: int) -> Dict[str, Any]:
+            student = database.upsert_student(
+                document_id=payload.document_id,
+                full_name=payload.full_name,
+                nickname=payload.nickname,
+                citizen_id=payload.citizen_id,
+                birth_date=payload.birth_date,
+                classroom=payload.classroom,
+                parent_name=payload.parent_name,
+                parent_phone=payload.parent_phone,
+                allergies=payload.allergies,
+                medical_notes=payload.medical_notes,
+                extraction_method="manual",
+                raw_json=payload.model_dump(),
+                db_path=cfg.db_path,
+            )
+            return {"success": True, "id": student.get("id", ""), "student": student}
+
+        return storage.execute_mutation("", "create_student", _do_create_student)
 
     @application.put("/api/students/{student_id}")
     def update_student(student_id: str, payload: StudentUpsertRequest):
+        storage.require_ready()
         existing = database.get_student_by_id(student_id, db_path=cfg.db_path)
         if not existing:
             raise HTTPException(status_code=404, detail="Student not found")
-        student = database.upsert_student(
-            student_id=student_id,
-            document_id=payload.document_id or existing.get("document_id") or None,
-            full_name=payload.full_name,
-            nickname=payload.nickname,
-            citizen_id=payload.citizen_id,
-            birth_date=payload.birth_date,
-            classroom=payload.classroom,
-            parent_name=payload.parent_name,
-            parent_phone=payload.parent_phone,
-            allergies=payload.allergies,
-            medical_notes=payload.medical_notes,
-            extraction_method="manual",
-            raw_json=payload.model_dump(),
-            db_path=cfg.db_path,
-        )
-        return {"success": True, "student": student}
+
+        def _do_update_student(_rev: int) -> Dict[str, Any]:
+            student = database.upsert_student(
+                student_id=student_id,
+                document_id=payload.document_id or existing.get("document_id") or None,
+                full_name=payload.full_name,
+                nickname=payload.nickname,
+                citizen_id=payload.citizen_id,
+                birth_date=payload.birth_date,
+                classroom=payload.classroom,
+                parent_name=payload.parent_name,
+                parent_phone=payload.parent_phone,
+                allergies=payload.allergies,
+                medical_notes=payload.medical_notes,
+                extraction_method="manual",
+                raw_json=payload.model_dump(),
+                db_path=cfg.db_path,
+            )
+            return {"success": True, "id": student_id, "student": student}
+
+        return storage.execute_mutation("", "update_student", _do_update_student)
 
     @application.delete("/api/students/{student_id}")
     def delete_student(student_id: str):
-        deleted = database.delete_student(student_id, db_path=cfg.db_path)
-        if not deleted:
+        storage.require_ready()
+        existing = database.get_student_by_id(student_id, db_path=cfg.db_path)
+        if not existing:
             raise HTTPException(status_code=404, detail="Student not found")
-        return {"success": True, "deleted_id": student_id}
+
+        return storage.execute_mutation(
+            "",
+            "delete_student",
+            lambda _rev: {
+                "success": database.delete_student(student_id, db_path=cfg.db_path),
+                "deleted_id": student_id,
+                "id": student_id,
+            },
+        )
 
     @application.get("/api/students/export.csv")
     def export_students_csv(
@@ -662,6 +828,7 @@ def create_app(
         classroom: Optional[str] = Query(None),
         has_allergy: Optional[bool] = Query(None),
     ):
+        storage.require_ready()
         data = database.list_students(
             query=query,
             classroom=classroom,
@@ -719,8 +886,10 @@ def create_app(
             raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {exc}")
 
         events = payload.get("events") or []
+        storage.require_ready()
         replies: List[Dict[str, Any]] = []
         rejected_events = 0
+        storage_failed = False
 
         for event in events:
             etype = event.get("type")
@@ -743,6 +912,7 @@ def create_app(
                 continue
 
             reply_obj: Optional[Dict[str, Any]] = None
+            event_uid = str(event.get("webhookEventId") or "").strip()
 
             if etype == "message":
                 msg = event.get("message") or {}
@@ -757,6 +927,7 @@ def create_app(
                     )
                 elif mtype in ("image", "file"):
                     msg_id = msg.get("id", "")
+                    op_id = f"line:msg:{event_uid or msg_id}" if (event_uid or msg_id) else ""
                     if cfg.line_channel_access_token and msg_id:
                         try:
                             file_bytes, content_type = line_service.download_line_content(
@@ -776,6 +947,8 @@ def create_app(
                                 ingestion_channel="line_oa",
                                 line_user_id=user_id,
                                 auto_extract=True,
+                                storage=storage,
+                                operation_id=op_id,
                             )
                             reply_obj = line_service.build_nong_chok_reply_summary(
                                 ocr_res,
@@ -785,6 +958,18 @@ def create_app(
                                 config=cfg,
                                 teacher_name=cfg.teacher_name,
                             )
+                        except storage_service.StorageError as exc:
+                            storage_failed = True
+                            reply_text = (
+                                f"ขออภัยครับ{cfg.teacher_name} ระบบจัดเก็บข้อมูลขัดข้องชั่วคราว "
+                                "จึงยังไม่ได้บันทึกเอกสารนี้ครับ กรุณาส่งใหม่อีกครั้งนะครับ"
+                            )
+                            reply_obj = {
+                                "success": False,
+                                "error": exc.error_code,
+                                "reply_text": reply_text,
+                                "line_messages": [{"type": "text", "text": reply_text}],
+                            }
                         except Exception as exc:
                             reply_text = f"น้องโชคเปิดไฟล์นี้ไม่ได้ครับ{cfg.teacher_name} ({exc})"
                             reply_obj = {
@@ -802,12 +987,34 @@ def create_app(
                         }
             elif etype == "postback":
                 pb_data = (event.get("postback") or {}).get("data", "")
-                reply_obj = line_service.handle_line_postback(
-                    pb_data,
-                    db_path=cfg.db_path,
-                    config=cfg,
-                    teacher_name=cfg.teacher_name,
-                )
+                pb_ts = str(event.get("timestamp") or "").strip()
+                if event_uid:
+                    pb_op_id = f"line:pb:{event_uid}"
+                elif pb_ts:
+                    pb_op_id = f"line:pb:{pb_ts}:{hashlib.sha256(pb_data.encode('utf-8')).hexdigest()[:16]}"
+                else:
+                    pb_op_id = ""
+                try:
+                    reply_obj = line_service.handle_line_postback(
+                        pb_data,
+                        db_path=cfg.db_path,
+                        config=cfg,
+                        teacher_name=cfg.teacher_name,
+                        storage=storage,
+                        operation_id=pb_op_id,
+                    )
+                except storage_service.StorageError as exc:
+                    storage_failed = True
+                    reply_text = (
+                        f"ขออภัยครับ{cfg.teacher_name} ระบบจัดเก็บข้อมูลขัดข้องชั่วคราว "
+                        "จึงยังไม่ได้บันทึกการเปลี่ยนแปลงครับ กรุณากดลองใหม่อีกครั้งนะครับ"
+                    )
+                    reply_obj = {
+                        "success": False,
+                        "error": exc.error_code,
+                        "reply_text": reply_text,
+                        "line_messages": [{"type": "text", "text": reply_text}],
+                    }
 
             if reply_obj:
                 if reply_token and cfg.line_channel_access_token:
@@ -820,6 +1027,19 @@ def create_app(
                     except Exception as exc:
                         print(f"[LINE] Reply API call skipped/failed: {exc}")
                 replies.append(reply_obj)
+
+        if storage_failed:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "success": False,
+                    "error": "storage_commit_failed",
+                    "storage_state": storage.state,
+                    "processed_events": len(replies),
+                    "rejected_events": rejected_events,
+                    "replies": replies,
+                },
+            )
 
         return {
             "success": True,
@@ -834,12 +1054,14 @@ def create_app(
         postback_data: str = Form(""),
         file: Optional[UploadFile] = File(None),
     ):
+        storage.require_ready()
         if postback_data.strip():
             res = line_service.handle_line_postback(
                 postback_data.strip(),
                 db_path=cfg.db_path,
                 config=cfg,
                 teacher_name=cfg.teacher_name,
+                storage=storage,
             )
             return JSONResponse({"mode": "postback", **res})
 
@@ -857,6 +1079,7 @@ def create_app(
                 ingestion_channel="line_oa",
                 line_user_id="sim-teacher",
                 auto_extract=True,
+                storage=storage,
             )
             summary = line_service.build_nong_chok_reply_summary(
                 ocr_res,
@@ -895,6 +1118,8 @@ def create_app(
         auto_extract: Optional[bool] = Form(None),
     ):
         try:
+            if save_to_db:
+                storage.require_ready()
             contents = await file.read()
             engine = get_engine()
             result = ocr_service.ingest_document(
@@ -911,8 +1136,11 @@ def create_app(
                 ingestion_channel="web_upload",
                 doc_date=doc_date,
                 auto_extract=auto_extract,
+                storage=storage if save_to_db else None,
             )
             return JSONResponse(result)
+        except storage_service.StorageError:
+            raise
         except ValueError as ve:
             raise HTTPException(status_code=400, detail=str(ve))
         except HTTPException:

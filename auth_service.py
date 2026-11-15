@@ -4,6 +4,7 @@ import hmac
 import json
 import secrets
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlencode, urlparse
@@ -13,6 +14,7 @@ from fastapi import Request, Response
 
 import database
 from config import AppConfig
+from storage_service import VaultStorageCoordinator
 
 SESSION_COOKIE_NAME = "nong_chok_session"
 CSRF_COOKIE_NAME = "nong_chok_csrf"
@@ -279,6 +281,7 @@ def issue_login_session(
     email: str,
     name: str,
     picture: str,
+    storage: Optional[VaultStorageCoordinator] = None,
 ) -> Dict[str, Any]:
     """Create a revocable SQLite auth session and set signed HttpOnly session + CSRF cookies."""
     clean_email = (email or "").strip().lower()
@@ -288,15 +291,27 @@ def issue_login_session(
     exp_ts = int(time.time()) + ttl
     exp_iso = datetime.fromtimestamp(exp_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    session_row = database.create_auth_session(
-        session_id=sid,
-        email=clean_email,
-        name=name,
-        picture=picture,
-        csrf_token=csrf_token,
-        expires_at=exp_iso,
-        db_path=cfg.db_path,
-    )
+    def _create_session(_rev: int) -> Dict[str, Any]:
+        row = database.create_auth_session(
+            session_id=sid,
+            email=clean_email,
+            name=name,
+            picture=picture,
+            csrf_token=csrf_token,
+            expires_at=exp_iso,
+            db_path=cfg.db_path,
+        )
+        return {"id": sid, "session": row}
+
+    if storage is not None:
+        session_row = storage.execute_mutation(
+            f"auth:login:{sid}",
+            "create_auth_session",
+            _create_session,
+        )["session"]
+    else:
+        session_row = _create_session(0)["session"]
+
     signed_session = sign_payload(
         {"sid": sid, "email": clean_email, "exp": exp_ts},
         cfg.auth_session_secret,
@@ -323,7 +338,12 @@ def issue_login_session(
     return session_row
 
 
-def revoke_login_session(response: Response, request: Request, cfg: AppConfig) -> bool:
+def revoke_login_session(
+    response: Response,
+    request: Request,
+    cfg: AppConfig,
+    storage: Optional[VaultStorageCoordinator] = None,
+) -> bool:
     """Revoke the active SQLite session server-side and clear browser cookies."""
     revoked = False
     token = request.cookies.get(SESSION_COOKIE_NAME, "")
@@ -332,7 +352,15 @@ def revoke_login_session(response: Response, request: Request, cfg: AppConfig) -
         if payload:
             sid = str(payload.get("sid") or "").strip()
             if sid:
-                revoked = database.revoke_auth_session(sid, db_path=cfg.db_path)
+                if storage is not None:
+                    res = storage.execute_mutation(
+                        f"auth:logout:{sid}:{uuid.uuid4().hex[:8]}",
+                        "revoke_auth_session",
+                        lambda _rev: {"id": sid, "revoked": database.revoke_auth_session(sid, db_path=cfg.db_path)},
+                    )
+                    revoked = bool(res.get("revoked"))
+                else:
+                    revoked = database.revoke_auth_session(sid, db_path=cfg.db_path)
 
     secure_flag = should_use_secure_cookie(request, cfg)
     response.delete_cookie(key=SESSION_COOKIE_NAME, path="/", secure=secure_flag, samesite="lax")

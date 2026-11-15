@@ -37,7 +37,7 @@
 
 1. **ตรวจไวยากรณ์โค้ด Python (Syntax Check):**
    ```bash
-   ./.venv/bin/python -m py_compile app.py config.py database.py extractor.py line_service.py ocr_service.py watcher.py
+   ./.venv/bin/python -m py_compile app.py auth_service.py config.py database.py extractor.py line_service.py ocr_service.py storage_service.py watcher.py
    ```
 2. **รันชุดทดสอบอัตโนมัติทั้งหมด (Unit & Integration Tests):**
    ```bash
@@ -80,6 +80,7 @@
    - ทำการ merge PR เข้า `main` และรอให้ workflow `.github/workflows/deploy-cloudflare.yml` บน `main` รันผ่าน
 2. **เมื่อเจ้าของโปรเจกต์อนุมัติให้ deploy (กรณีสั่ง deploy จากเครื่อง):**
    - สลับไปยัง `main` ที่ดึง commit ล่าสุดแล้ว (`git checkout main && git pull --ff-only`)
+   - หากเป็นการเปิดใช้งาน R2 ครั้งแรก ให้สร้าง private R2 bucket ชื่อ `nong-chokchuay-vault` (ห้ามเปิด Public Access) จากนั้น deploy ชั่วคราวพร้อม `--var R2_BOOTSTRAP_IF_EMPTY:true`, เรียก `GET /api/health` เพื่อสร้าง snapshot แรก แล้ว deploy ซ้ำเพื่อปิดกลับเป็น `R2_BOOTSTRAP_IF_EMPTY:false`
    - รันคำสั่ง deploy ผ่าน Wrangler:
      ```bash
      npx wrangler deploy
@@ -100,11 +101,12 @@
 ห้ามใช้เพียง `/api/health` แล้วสรุปว่างานเสร็จ ต้องตรวจทั้งสถานะพื้นฐานและพฤติกรรมของฟีเจอร์ที่แก้ไข:
 
 1. **ตรวจสถานะพื้นฐานและการตั้งค่าระบบ:**
-   - `GET /api/health` (ตรวจสถานะเซิร์ฟเวอร์ โมเดล OCR และสถานะตัวแปรตั้งต้น)
-   - `GET /api/stats` (ตรวจการเชื่อมต่อฐานข้อมูล SQLite และยอดสรุป)
+   - `GET /api/health` (ตรวจสถานะเซิร์ฟเวอร์, `storage_state == "READY"`, `storage_revision`, และ `busy`)
+   - `GET /api/system` / `GET /api/documents` (ตรวจการเชื่อมต่อฐานข้อมูล SQLite และยอดสรุป)
 2. **ตรวจ Flow ของฟีเจอร์ที่ได้รับผลกระทบ:**
-   - ช่องทางเว็บ: ทดสอบอัปโหลดภาพหรือกดเอกสารตัวอย่าง (`/api/ocr/sample/...`), ตรวจถาดรอตรวจ (`/api/documents/review-queue`), สมุดเบิกจ่าย (`/api/expenses`) และแฟ้มเด็กอนุบาล (`/api/students`)
+   - ช่องทางเว็บ: ทดสอบอัปโหลดภาพหรือกดเอกสารตัวอย่าง (`/api/ocr`, `/api/samples/kindergarten/...`), ตรวจถาดรอตรวจ, สมุดเบิกจ่าย (`/api/expenses`), แฟ้มเด็กอนุบาล (`/api/students`), ดาวน์โหลดไฟล์ต้นฉบับ (`/api/documents/{doc_id}/file`) และตรวจว่าข้อมูลยังอยู่หลัง restart / idle sleep
    - ช่องทาง LINE OA: ทดสอบผ่าน `/api/line/simulate` หรือส่งข้อความ/รูปภาพผ่าน LINE Webhook จริงหากการแก้ไขเกี่ยวข้องกับ `line_service.py`
 3. **การย้อนกลับเมื่อพบปัญหา (Rollback):**
    - สำหรับ Cloudflare Worker / Container: ใช้ `npx wrangler rollback` เพื่อย้อนกลับไปยัง deployment ก่อนหน้าทันที
+   - สำหรับข้อมูล SQLite บน R2: เลือก snapshot รุ่นก่อนหน้าใน `vault/snapshots/` จากรายการ `retained_snapshots` มากู้คืนแทนรุ่นที่เสียหายได้โดยไฟล์ต้นฉบับยังไม่ถูกลบตราบใดที่ snapshot นั้นยังอยู่ในช่วง `SNAPSHOT_RETENTION_COUNT`
    - สำหรับโค้ดใน Git: สร้าง revert PR จาก `main` และแจ้งผลพร้อมสาเหตุให้เจ้าของโปรเจกต์ทราบ

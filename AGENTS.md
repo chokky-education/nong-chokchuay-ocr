@@ -39,15 +39,15 @@
 - **เป้าหมายของผลิตภัณฑ์:** ระบบผู้ช่วยคุณครูอนุบาล **"น้องโชคช่วย" (Nong ChokChuay)** และคลังเอกสาร OCR ภาษาไทยส่วนตัว (OpenThai 2.0 Vault) สำหรับสแกนเก็บเอกสารโรงเรียน บันทึกบิลสำรองจ่ายรอเบิกคืน และจัดเก็บแฟ้มทะเบียนเด็กอนุบาลพร้อมป้ายเตือนแพ้อาหาร
 - **ผู้ใช้หลัก:** คุณครูอนุบาล (เช่น ครูประจำชั้นที่ส่งบิล สูติบัตร หรือหนังสือเวียนผ่าน LINE OA และตรวจทานบนเว็บ/LIFF) และผู้ดูแลระบบแบบ Solo SaaS
 - **ขอบเขตที่ไม่รวม:**
-  - ไม่ส่งไฟล์ภาพหรือ PDF ต้นฉบับออกไปยังบริการคลาวด์หรือ LLM ภายนอก (หากเปิดใช้ LLM เสริม ให้ส่งเฉพาะข้อความที่ผ่าน OCR แล้วเท่านั้น)
-  - ไม่พึ่งพาฐานข้อมูลแยกส่วนหรือระบบ Message Broker ภายนอกเกินกว่า SQLite เดี่ยว
+  - ไม่ส่งไฟล์ภาพหรือ PDF ต้นฉบับออกไปยังบริการ AI/LLM ภายนอกหรือสาธารณะ (หากเปิดใช้ LLM เสริม ให้ส่งเฉพาะข้อความที่ผ่าน OCR แล้วเท่านั้น; ในโหมด Cloudflare อนุญาตให้เก็บ snapshot และไฟล์ต้นฉบับแบบส่วนตัวใน R2 bucket ของระบบเอง `nong-chokchuay-vault` ผ่าน Worker/Container เท่านั้น ตาม ADR 0003)
+  - ไม่พึ่งพาฐานข้อมูลแยกส่วน (เช่น Postgres/MySQL) หรือระบบ Message Broker ภายนอกเกินกว่า SQLite เดี่ยว (+ Cloudflare R2 สำหรับสำเนา/กู้คืนถาวรบน Cloud)
   - ไม่แยกเซิร์ฟเวอร์ฝั่ง LINE Webhook เป็น Node/TypeScript แยกจาก FastAPI หลัก
 - **สถาปัตยกรรมและข้อกำหนดที่ต้องรักษา:**
   - ประมวลผลภาษาไทยด้วย **OpenThai 2.0 ONNX** บน CPU ภายในแอป **FastAPI** เดี่ยว (`app.py`, `ocr_service.py`)
-  - เก็บข้อมูลทั้งหมดใน **SQLite + FTS5 trigram** เดียว (`data/documents.db`) และเก็บไฟล์ต้นฉบับใน `data/uploads/` โดยดูแลโครงสร้างตารางผ่าน migration ที่รันซ้ำได้อย่างปลอดภัย (`database.py`)
+  - เก็บข้อมูลทั้งหมดใน **SQLite + FTS5 trigram** เดียว (`data/documents.db`) และเก็บไฟล์ต้นฉบับใน `data/uploads/` โดยดูแลโครงสร้างตารางผ่าน migration ที่รันซ้ำได้อย่างปลอดภัย (`database.py`) และเมื่อรันบน Cloudflare (`R2_REQUIRED=true` / `VAULT_BUCKET`) ให้ยืนยันการเปลี่ยนแปลงผ่าน `storage_service.py` + `VaultR2Gateway` ไปยัง R2 bucket ส่วนตัว (`nong-chokchuay-vault`) ก่อนตอบสำเร็จเสมอ (ตาม ADR 0003)
   - สกัดข้อมูลบิลและทะเบียนเด็กด้วย **Offline Thai Regex เป็นหลัก** และใช้ Text-only LLM adapter (`extractor.py`) เป็นทางเลือกเสริมเท่านั้น
   - ใช้ตรรกะธุรกิจร่วมกันทุกช่องทางรับข้อมูล (`web_upload`, `watch_folder`, `line_oa`, `api`)
-  - รักษารูปแบบการรันบน **Cloudflare Containers** (ตั้งค่า `sleep_after = "3m"`, scale-to-zero ใน `wrangler.toml` และ `worker.js`) ให้อยู่ในงบประมาณ Workers Paid ($5/เดือน)
+  - รักษารูปแบบการรันบน **Cloudflare Containers** (ตั้งค่า `sleep_after = "3m"` / `SLEEP_AFTER_MS`, scale-to-zero ใน `wrangler.toml` และ `worker.js`) ให้เหมาะกับแผน Workers Paid (ค่าพื้นฐาน $5/เดือน พร้อมโควตาในตัว + R2 free tier 10 GB-month, 1M Class A, 10M Class B โดยไม่ใช่เพดานค่าใช้จ่ายสูงสุด)
 
 กติกา:
 - ทำงานภายในขอบเขตที่เจ้าของอนุมัติ
@@ -89,8 +89,9 @@
 - อัปเดต `docs/STATUS.md` ตามสิ่งที่ทำจริง
 - อัปเดต `INDEX.md` เมื่อเพิ่ม ย้าย หรือเลิกใช้ไฟล์/โมดูล
 - รัน tests, syntax, guardrails และ index ตามที่โปรเจกต์กำหนด:
-  - ตรวจ syntax Python: `./.venv/bin/python -m py_compile app.py config.py database.py extractor.py line_service.py ocr_service.py watcher.py`
+  - ตรวจ syntax Python: `./.venv/bin/python -m py_compile app.py auth_service.py config.py database.py extractor.py line_service.py ocr_service.py storage_service.py watcher.py`
   - รันชุดทดสอบทั้งหมด: `./.venv/bin/python -m unittest discover -s tests -v`
+  - ตรวจ syntax และชุดทดสอบ JS: `node --check worker.js && node --check static/app.js && node --test tests/test_worker_js.mjs tests/test_frontend_auth.mjs`
   - รันเซิร์ฟเวอร์ทดสอบในเครื่อง (เมื่อต้องตรวจพฤติกรรมจริง): `./start.sh` (หรือ `./.venv/bin/python app.py`)
 - รีวิว diff ตาม `CODING_STANDARDS.md` และแก้ประเด็นที่พบ
 

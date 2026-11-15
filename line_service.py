@@ -8,6 +8,7 @@ import requests
 
 import database
 from config import AppConfig
+from storage_service import VaultStorageCoordinator
 
 DEFAULT_TEACHER_NAME = "ครูพิ้งกี้"
 
@@ -597,9 +598,19 @@ def handle_line_postback(
     db_path: str,
     config: Optional[AppConfig] = None,
     teacher_name: Optional[str] = None,
+    storage: Optional[VaultStorageCoordinator] = None,
+    operation_id: str = "",
 ) -> Dict[str, Any]:
     """Handle LINE Postback / simulator button clicks such as confirm_review or mark_reimbursed."""
+    if storage is not None:
+        storage.require_ready()
+        if operation_id:
+            existing = storage.get_committed_operation(operation_id)
+            if existing is not None:
+                return existing
+
     target_teacher = _resolve_teacher_name(config, teacher_name)
+    r2_enabled = bool(config and config.is_r2_enabled())
     parsed = parse_qs(data_str or "")
     action = (parsed.get("action") or [""])[0].strip()
     doc_id = (parsed.get("doc_id") or [""])[0].strip()
@@ -612,7 +623,7 @@ def handle_line_postback(
             "line_messages": [{"type": "text", "text": reply_text}],
         }
 
-    doc = database.get_document_by_id(doc_id, db_path=db_path)
+    doc = database.get_document_by_id(doc_id, db_path=db_path, r2_enabled=r2_enabled)
     if not doc:
         reply_text = f"ไม่พบเอกสารนี้ในฐานข้อมูลแล้วครับ{target_teacher}"
         return {
@@ -622,50 +633,77 @@ def handle_line_postback(
         }
 
     if action == "confirm_review":
-        updated = database.update_document_metadata(
-            doc_id=doc_id,
-            review_status="reviewed",
-            db_path=db_path,
-        )
-        reply_text = f'✅ น้องโชคยืนยันตรวจเอกสาร "{doc["filename"]}" เรียบร้อยแล้วครับ{target_teacher}!'
-        return {
-            "success": True,
-            "action": action,
-            "document": updated,
-            "reply_text": reply_text,
-            "line_messages": [{"type": "text", "text": reply_text}],
-        }
-
-    if action == "mark_reimbursed":
-        database.update_document_metadata(doc_id=doc_id, review_status="reviewed", db_path=db_path)
-        exp = doc.get("expense")
-        if exp:
-            updated_exp = database.upsert_expense(
-                document_id=doc_id,
-                merchant=exp["merchant"],
-                expense_date=exp["expense_date"],
-                subtotal=exp["subtotal"],
-                vat_amount=exp["vat_amount"],
-                total_amount=exp["total_amount"],
-                currency=exp["currency"],
-                expense_category=exp["expense_category"],
-                extraction_method=exp["extraction_method"],
-                reimbursement_status="reimbursed",
-                budget_source=exp.get("budget_source") or "classroom",
-                raw_json=exp.get("raw_json"),
+        def _do_confirm(_rev: int) -> Dict[str, Any]:
+            updated = database.update_document_metadata(
+                doc_id=doc_id,
+                review_status="reviewed",
                 db_path=db_path,
+                r2_enabled=r2_enabled,
             )
-            reply_text = (
-                f"💸 บันทึกว่าเบิกเงินคืนจากโรงเรียนแล้ว ({updated_exp['total_amount']:,.2f} บาท) "
-                f"สำหรับบิล {updated_exp['merchant'] or doc['filename']} ครับ{target_teacher}!"
-            )
+            reply_text = f'✅ น้องโชคยืนยันตรวจเอกสาร "{doc["filename"]}" เรียบร้อยแล้วครับ{target_teacher}!'
             return {
                 "success": True,
+                "doc_id": doc_id,
                 "action": action,
-                "expense": updated_exp,
+                "document": updated,
                 "reply_text": reply_text,
                 "line_messages": [{"type": "text", "text": reply_text}],
             }
+
+        if storage is not None:
+            return storage.execute_mutation(operation_id, "line_postback_confirm_review", _do_confirm)
+        return _do_confirm(0)
+
+    if action == "mark_reimbursed":
+        def _do_reimburse(_rev: int) -> Dict[str, Any]:
+            database.update_document_metadata(
+                doc_id=doc_id,
+                review_status="reviewed",
+                db_path=db_path,
+                r2_enabled=r2_enabled,
+            )
+            exp = doc.get("expense")
+            if exp:
+                updated_exp = database.upsert_expense(
+                    document_id=doc_id,
+                    merchant=exp["merchant"],
+                    expense_date=exp["expense_date"],
+                    subtotal=exp["subtotal"],
+                    vat_amount=exp["vat_amount"],
+                    total_amount=exp["total_amount"],
+                    currency=exp["currency"],
+                    expense_category=exp["expense_category"],
+                    extraction_method=exp["extraction_method"],
+                    reimbursement_status="reimbursed",
+                    budget_source=exp.get("budget_source") or "classroom",
+                    raw_json=exp.get("raw_json"),
+                    db_path=db_path,
+                )
+                reply_text = (
+                    f"💸 บันทึกว่าเบิกเงินคืนจากโรงเรียนแล้ว ({updated_exp['total_amount']:,.2f} บาท) "
+                    f"สำหรับบิล {updated_exp['merchant'] or doc['filename']} ครับ{target_teacher}!"
+                )
+                return {
+                    "success": True,
+                    "doc_id": doc_id,
+                    "action": action,
+                    "expense": updated_exp,
+                    "reply_text": reply_text,
+                    "line_messages": [{"type": "text", "text": reply_text}],
+                }
+
+            reply_text = f"น้องโชคได้รับคำสั่ง ({action}) แล้วครับ{target_teacher}"
+            return {
+                "success": True,
+                "doc_id": doc_id,
+                "action": action,
+                "reply_text": reply_text,
+                "line_messages": [{"type": "text", "text": reply_text}],
+            }
+
+        if storage is not None:
+            return storage.execute_mutation(operation_id, "line_postback_reimburse", _do_reimburse)
+        return _do_reimburse(0)
 
     reply_text = f"น้องโชคได้รับคำสั่ง ({action}) แล้วครับ{target_teacher}"
     return {

@@ -1,3 +1,4 @@
+import hashlib
 import os
 import shutil
 import threading
@@ -6,7 +7,9 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import ocr_service
+import storage_service
 from config import AppConfig
+from storage_service import VaultStorageCoordinator
 
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".tif", ".pdf"}
 IGNORED_SUFFIXES = (".tmp", ".part", ".crdownload", ".download")
@@ -32,9 +35,12 @@ class InboxWatcher:
         self,
         config: AppConfig,
         engine_getter: Callable[[], Any],
+        storage: Optional[VaultStorageCoordinator] = None,
     ) -> None:
         self.config = config
         self.engine_getter = engine_getter
+        self.storage = storage
+        self.is_scanning: bool = False
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -85,70 +91,94 @@ class InboxWatcher:
         return candidates
 
     def scan_once(self, require_stability: bool = False) -> Dict[str, Any]:
-        """Scan inbox once, ingesting valid files and quarantining failures."""
+        """Scan inbox once, ingesting valid files and quarantining non-storage failures."""
         with self._lock:
-            self.config.ensure_dirs()
-            processed_ids: List[str] = []
-            failed_files: List[str] = []
-            skipped = 0
+            if self.storage is not None and self.storage.state != "READY":
+                return {
+                    "processed": 0,
+                    "failed": 0,
+                    "skipped": 0,
+                    "doc_ids": [],
+                    "processed_ids": [],
+                    "failed_files": [],
+                    "storage_state": self.storage.state,
+                }
 
-            candidates = self._iter_candidate_files()
-            active_paths = set()
+            self.is_scanning = True
+            try:
+                self.config.ensure_dirs()
+                processed_ids: List[str] = []
+                failed_files: List[str] = []
+                skipped = 0
 
-            for name, full_path, auto_tags in candidates:
-                active_paths.add(full_path)
+                candidates = self._iter_candidate_files()
+                active_paths = set()
 
-                try:
-                    size = os.path.getsize(full_path)
-                except OSError:
-                    skipped += 1
-                    continue
+                for name, full_path, auto_tags in candidates:
+                    active_paths.add(full_path)
 
-                if require_stability:
-                    prev_size = self._pending_sizes.get(full_path)
-                    if prev_size is None or prev_size != size:
-                        self._pending_sizes[full_path] = size
+                    try:
+                        size = os.path.getsize(full_path)
+                    except OSError:
                         skipped += 1
                         continue
 
-                self._pending_sizes.pop(full_path, None)
-                try:
-                    with open(full_path, "rb") as fh:
-                        contents = fh.read()
-                    engine = self.engine_getter()
-                    res = ocr_service.ingest_document(
-                        contents=contents,
-                        filename=name,
-                        engine=engine,
-                        config=self.config,
-                        process_all_pages=True,
-                        save_to_db=True,
-                        tags=auto_tags,
-                        ingestion_channel="watch_folder",
-                    )
-                    os.remove(full_path)
-                    if res.get("doc_id"):
-                        processed_ids.append(res["doc_id"])
-                except Exception as exc:
-                    self._quarantine_file(full_path, name, str(exc))
-                    failed_files.append(name)
+                    if require_stability:
+                        prev_size = self._pending_sizes.get(full_path)
+                        if prev_size is None or prev_size != size:
+                            self._pending_sizes[full_path] = size
+                            skipped += 1
+                            continue
 
-            # Drop stale entries for removed files
-            for tracked in list(self._pending_sizes.keys()):
-                if tracked not in active_paths:
-                    self._pending_sizes.pop(tracked, None)
+                    self._pending_sizes.pop(full_path, None)
+                    try:
+                        with open(full_path, "rb") as fh:
+                            contents = fh.read()
+                        file_sha256 = hashlib.sha256(contents).hexdigest()
+                        rel_path = os.path.relpath(full_path, self.config.inbox_dir)
+                        op_id = f"watcher:{rel_path}:{len(contents)}:{file_sha256}"
 
-            self.last_scan_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            summary = {
-                "processed": len(processed_ids),
-                "failed": len(failed_files),
-                "skipped": skipped,
-                "doc_ids": processed_ids,
-                "failed_files": failed_files,
-                "scanned_at": self.last_scan_at,
-            }
-            self.last_result = summary
-            return summary
+                        engine = self.engine_getter()
+                        res = ocr_service.ingest_document(
+                            contents=contents,
+                            filename=name,
+                            engine=engine,
+                            config=self.config,
+                            process_all_pages=True,
+                            save_to_db=True,
+                            tags=auto_tags,
+                            ingestion_channel="watch_folder",
+                            storage=self.storage,
+                            operation_id=op_id,
+                        )
+                        os.remove(full_path)
+                        if res.get("doc_id"):
+                            processed_ids.append(res["doc_id"])
+                    except storage_service.StorageError as exc:
+                        print(f"[Watcher] Deferred '{name}' due to storage error ({exc.error_code}): {exc}")
+                        skipped += 1
+                    except Exception as exc:
+                        self._quarantine_file(full_path, name, str(exc))
+                        failed_files.append(name)
+
+                # Drop stale entries for removed files
+                for tracked in list(self._pending_sizes.keys()):
+                    if tracked not in active_paths:
+                        self._pending_sizes.pop(tracked, None)
+
+                self.last_scan_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                summary = {
+                    "processed": len(processed_ids),
+                    "failed": len(failed_files),
+                    "skipped": skipped,
+                    "doc_ids": processed_ids,
+                    "failed_files": failed_files,
+                    "scanned_at": self.last_scan_at,
+                }
+                self.last_result = summary
+                return summary
+            finally:
+                self.is_scanning = False
 
     def get_status(self) -> Dict[str, Any]:
         self.config.ensure_dirs()
@@ -162,6 +192,7 @@ class InboxWatcher:
         return {
             "enabled": self.config.inbox_poll_seconds > 0,
             "running": bool(self._thread and self._thread.is_alive()),
+            "is_scanning": self.is_scanning,
             "polling_seconds": self.config.inbox_poll_seconds,
             "inbox_dir": self.config.inbox_dir,
             "inbox_subfolders": {
