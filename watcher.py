@@ -74,6 +74,26 @@ class InboxWatcher:
             except OSError:
                 pass
 
+    @staticmethod
+    def _parse_opid_sidecar(raw: str) -> Optional[Tuple[int, str, str]]:
+        """Validate and parse '<size>:<sha256>:<op_id>' sidecar content."""
+        match = re.fullmatch(
+            r"(\d+):([0-9a-f]{64}):(watcher:[^\r\n\t\x00]+:(\d+):([0-9a-f]{64}):[0-9a-f]{12})",
+            raw,
+        )
+        if not match:
+            return None
+        sidecar_size = int(match.group(1))
+        sidecar_sha256 = match.group(2)
+        op_id = match.group(3)
+        embedded_size = int(match.group(4))
+        embedded_sha256 = match.group(5)
+        if sidecar_size != embedded_size or sidecar_sha256 != embedded_sha256:
+            return None
+        if any(ord(ch) < 32 for ch in op_id):
+            return None
+        return (sidecar_size, sidecar_sha256, op_id)
+
     def _get_or_create_operation_id(
         self,
         full_path: str,
@@ -91,34 +111,35 @@ class InboxWatcher:
                 )
             try:
                 with open(sidecar, "r", encoding="utf-8") as fh:
-                    raw = fh.read().strip()
+                    raw = fh.read().strip("\r\n")
+            except UnicodeDecodeError as exc:
+                raise storage_service.StorageUnavailableError(
+                    f"Corrupted operation ID sidecar '{sidecar}': {exc}",
+                    error_code="watcher_opid_corrupted",
+                ) from exc
             except OSError as exc:
                 raise storage_service.StorageUnavailableError(
                     f"Failed to read operation ID sidecar '{sidecar}': {exc}",
                     error_code="watcher_opid_io_error",
                 ) from exc
 
-            if raw.startswith(prefix):
-                existing = raw[len(prefix):].strip()
-                if existing and not any(ch.isspace() for ch in existing):
-                    self._active_op_ids[full_path] = (file_size, file_sha256, existing)
-                    return existing
+            parsed = self._parse_opid_sidecar(raw)
+            if parsed is None:
                 raise storage_service.StorageUnavailableError(
                     f"Corrupted operation ID sidecar '{sidecar}'",
                     error_code="watcher_opid_corrupted",
                 )
-
-            if not re.fullmatch(r"\d+:[0-9a-f]{64}:\S+", raw):
-                raise storage_service.StorageUnavailableError(
-                    f"Corrupted operation ID sidecar '{sidecar}'",
-                    error_code="watcher_opid_corrupted",
-                )
+            parsed_size, parsed_sha256, existing_op_id = parsed
+            if parsed_size == file_size and parsed_sha256 == file_sha256:
+                self._active_op_ids[full_path] = (file_size, file_sha256, existing_op_id)
+                return existing_op_id
 
         cached = self._active_op_ids.get(full_path)
         if cached and cached[0] == file_size and cached[1] == file_sha256:
             op_id = cached[2]
         else:
-            op_id = f"watcher:{rel_path}:{file_size}:{file_sha256}:{uuid.uuid4().hex[:12]}"
+            path_hash = hashlib.sha256(rel_path.encode("utf-8")).hexdigest()[:16]
+            op_id = f"watcher:{path_hash}:{file_size}:{file_sha256}:{uuid.uuid4().hex[:12]}"
             self._active_op_ids[full_path] = (file_size, file_sha256, op_id)
 
         expected_payload = f"{prefix}{op_id}"
@@ -131,7 +152,7 @@ class InboxWatcher:
                     os.fsync(fh.fileno())
             os.replace(tmp_sidecar, sidecar)
             with open(sidecar, "r", encoding="utf-8") as fh:
-                persisted = fh.read().strip()
+                persisted = fh.read().strip("\r\n")
         except OSError as exc:
             if os.path.exists(tmp_sidecar):
                 try:

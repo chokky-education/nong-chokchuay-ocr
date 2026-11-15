@@ -1075,6 +1075,7 @@ class R2PersistenceTests(unittest.TestCase):
 
     def test_18_s1r_concurrent_session_read_waits_for_in_flight_aborted_logout_without_false_401(self):
         import time
+        from unittest import mock
         import auth_service
 
         r2 = InMemoryR2Gateway()
@@ -1106,92 +1107,127 @@ class R2PersistenceTests(unittest.TestCase):
                     cfg.auth_session_secret,
                 )
 
-                logout_in_manifest_put = threading.Event()
-                allow_logout_abort = threading.Event()
+                storage = test_app.state.storage
                 orig_put_manifest = r2.put_manifest
-                logout_intercepted = {"done": False}
+                orig_require_ready = storage.require_ready
+                orig_get_session = database.get_active_auth_session
 
-                def _stalling_failed_put_manifest(manifest, *, if_match=None, if_none_match_star=False):
-                    if not logout_intercepted["done"]:
-                        logout_intercepted["done"] = True
-                        logout_in_manifest_put.set()
-                        allow_logout_abort.wait(timeout=5.0)
-                        raise storage_service.StorageCommitError(
-                            "Simulated transient R2 manifest failure",
-                            error_code="manifest_network_err",
+                def _run_readiness_before_logout_race(endpoint_path: str) -> dict:
+                    reader_worker_tid = {"id": None}
+                    reader_passed_readiness = threading.Event()
+                    logout_dispatched = threading.Event()
+                    logout_in_manifest_put = threading.Event()
+                    allow_logout_abort = threading.Event()
+                    saw_logout_in_manifest_during_read = {"value": False}
+                    logout_intercepted = {"done": False}
+                    results: dict[str, object] = {}
+                    errors: list[Exception] = []
+
+                    def _hooked_require_ready():
+                        res = orig_require_ready()
+                        # Capture the first worker entering readiness (always the reader before logout starts).
+                        if reader_worker_tid["id"] is None:
+                            reader_worker_tid["id"] = threading.get_ident()
+                            reader_passed_readiness.set()
+                        return res
+
+                    def _hooked_get_active_auth_session(session_id: str, db_path: str = ""):
+                        if threading.get_ident() == reader_worker_tid["id"]:
+                            self.assertTrue(logout_dispatched.wait(timeout=5.0))
+                            # Give an unlocked concurrent logout time to mutate SQLite and reach R2 put_manifest.
+                            saw_logout_in_manifest_during_read["value"] = logout_in_manifest_put.wait(timeout=0.25)
+                        return orig_get_session(session_id, db_path=db_path)
+
+                    def _stalling_failed_put_manifest(manifest, *, if_match=None, if_none_match_star=False):
+                        if not logout_intercepted["done"]:
+                            logout_intercepted["done"] = True
+                            logout_in_manifest_put.set()
+                            allow_logout_abort.wait(timeout=5.0)
+                            raise storage_service.StorageCommitError(
+                                "Simulated transient R2 manifest failure",
+                                error_code="manifest_network_err",
+                            )
+                        return orig_put_manifest(
+                            manifest,
+                            if_match=if_match,
+                            if_none_match_star=if_none_match_star,
                         )
-                    return orig_put_manifest(
-                        manifest,
-                        if_match=if_match,
-                        if_none_match_star=if_none_match_star,
-                    )
 
-                r2.put_manifest = _stalling_failed_put_manifest
-                results: dict[str, object] = {}
-                docs_done = threading.Event()
-                me_done = threading.Event()
-                errors: list[Exception] = []
+                    def _run_reader():
+                        try:
+                            results["reader"] = client.get(
+                                endpoint_path,
+                                headers={"cookie": f"{auth_service.SESSION_COOKIE_NAME}={cookie_val}"},
+                            )
+                        except Exception as exc:
+                            errors.append(exc)
 
-                def _run_logout():
+                    def _run_logout():
+                        try:
+                            logout_dispatched.set()
+                            results["logout"] = client.post(
+                                "/api/auth/logout",
+                                headers={
+                                    "cookie": f"{auth_service.SESSION_COOKIE_NAME}={cookie_val}",
+                                    "origin": "http://127.0.0.1:8765",
+                                    "x-csrf-token": "csrf-s1r",
+                                },
+                            )
+                        except Exception as exc:
+                            errors.append(exc)
+
+                    r2.put_manifest = _stalling_failed_put_manifest
+                    t_reader = threading.Thread(target=_run_reader)
+                    t_logout = threading.Thread(target=_run_logout)
                     try:
-                        results["logout"] = client.post(
-                            "/api/auth/logout",
-                            headers={
-                                "cookie": f"{auth_service.SESSION_COOKIE_NAME}={cookie_val}",
-                                "origin": "http://127.0.0.1:8765",
-                                "x-csrf-token": "csrf-s1r",
-                            },
-                        )
-                    except Exception as exc:
-                        errors.append(exc)
-
-                def _run_docs():
-                    try:
-                        results["docs"] = client.get(
-                            "/api/documents",
-                            headers={"cookie": f"{auth_service.SESSION_COOKIE_NAME}={cookie_val}"},
-                        )
-                    except Exception as exc:
-                        errors.append(exc)
+                        with mock.patch.object(storage, "require_ready", side_effect=_hooked_require_ready), \
+                             mock.patch("auth_service.database.get_active_auth_session", side_effect=_hooked_get_active_auth_session):
+                            t_reader.start()
+                            self.assertTrue(reader_passed_readiness.wait(timeout=5.0))
+                            t_logout.start()
+                            t_reader.join(timeout=5.0)
+                            self.assertTrue(logout_in_manifest_put.wait(timeout=5.0))
+                            allow_logout_abort.set()
+                            t_logout.join(timeout=5.0)
                     finally:
-                        docs_done.set()
+                        allow_logout_abort.set()
+                        r2.put_manifest = orig_put_manifest
 
-                def _run_me():
-                    try:
-                        results["me"] = client.get(
-                            "/api/auth/me",
-                            headers={"cookie": f"{auth_service.SESSION_COOKIE_NAME}={cookie_val}"},
-                        )
-                    except Exception as exc:
-                        errors.append(exc)
-                    finally:
-                        me_done.set()
+                    self.assertEqual(errors, [])
+                    return {
+                        "reader": results["reader"],
+                        "logout": results["logout"],
+                        "logout_reached_put_during_read": saw_logout_in_manifest_during_read["value"],
+                    }
 
-                t_logout = threading.Thread(target=_run_logout)
-                t_logout.start()
-                self.assertTrue(logout_in_manifest_put.wait(timeout=5.0))
+                # 1) Production execute_read (locked): logout cannot interleave after readiness on either route.
+                docs_race = _run_readiness_before_logout_race("/api/documents")
+                self.assertFalse(docs_race["logout_reached_put_during_read"])
+                self.assertEqual(docs_race["reader"].status_code, 200)
+                self.assertEqual(docs_race["logout"].status_code, 503)
 
-                t_docs = threading.Thread(target=_run_docs)
-                t_me = threading.Thread(target=_run_me)
-                t_docs.start()
-                t_me.start()
+                me_race = _run_readiness_before_logout_race("/api/auth/me")
+                self.assertFalse(me_race["logout_reached_put_during_read"])
+                self.assertEqual(me_race["reader"].status_code, 200)
+                self.assertTrue(me_race["reader"].json()["authenticated"])
+                self.assertEqual(me_race["logout"].status_code, 503)
 
-                # Both readers must block under _mutation_lock until logout finishes and rolls back SQLite.
-                time.sleep(0.15)
-                self.assertFalse(docs_done.is_set())
-                self.assertFalse(me_done.is_set())
+                # 2) Negative control: without _mutation_lock around execute_read, this exact sequence triggers the old race!
+                def _unlocked_execute_read(read_fn):
+                    storage.require_ready()
+                    return read_fn()
 
-                r2.put_manifest = orig_put_manifest
-                allow_logout_abort.set()
-                t_logout.join(timeout=5.0)
-                t_docs.join(timeout=5.0)
-                t_me.join(timeout=5.0)
+                with mock.patch.object(storage, "execute_read", side_effect=_unlocked_execute_read):
+                    unlocked_docs_race = _run_readiness_before_logout_race("/api/documents")
+                    self.assertTrue(unlocked_docs_race["logout_reached_put_during_read"])
+                    self.assertEqual(unlocked_docs_race["reader"].status_code, 401)
+                    self.assertEqual(unlocked_docs_race["logout"].status_code, 503)
 
-                self.assertEqual(errors, [])
-                self.assertEqual(results["logout"].status_code, 503)
-                self.assertEqual(results["docs"].status_code, 200)
-                self.assertEqual(results["me"].status_code, 200)
-                self.assertTrue(results["me"].json()["authenticated"])
+                    unlocked_me_race = _run_readiness_before_logout_race("/api/auth/me")
+                    self.assertTrue(unlocked_me_race["logout_reached_put_during_read"])
+                    self.assertEqual(unlocked_me_race["reader"].status_code, 200)
+                    self.assertFalse(unlocked_me_race["reader"].json()["authenticated"])
+                    self.assertEqual(unlocked_me_race["logout"].status_code, 503)
 
     def test_19_f3r_watcher_defers_when_opid_sidecar_write_or_read_fails_and_never_duplicates(self):
         import builtins
@@ -1204,7 +1240,9 @@ class R2PersistenceTests(unittest.TestCase):
             png_bytes = _make_png_bytes((22, 44, 66))
             test_app = create_app(config=cfg, engine_factory=lambda: FakeLineOCR(), storage_client=r2)
             with TestClient(test_app) as client:
-                inbox_file = os.path.join(cfg.inbox_dir, "receipt_f3r.png")
+                spaced_dir = os.path.join(cfg.inbox_dir, "ครู อนุบาล 1")
+                os.makedirs(spaced_dir, exist_ok=True)
+                inbox_file = os.path.join(spaced_dir, "บิล สีเทียน f3r.png")
                 with open(inbox_file, "wb") as fh:
                     fh.write(png_bytes)
 
@@ -1222,41 +1260,50 @@ class R2PersistenceTests(unittest.TestCase):
                 # Once sidecar persists cleanly, simulate ambiguous R2 response (committed in R2, error returned).
                 orig_put_manifest = r2.put_manifest
                 orig_get_manifest = r2.get_manifest
-                ambiguous_calls = {"put": 0, "get": 0}
 
-                def _commit_then_drop_ack(manifest, *, if_match=None, if_none_match_star=False):
-                    res = orig_put_manifest(
-                        manifest,
-                        if_match=if_match,
-                        if_none_match_star=if_none_match_star,
-                    )
-                    if ambiguous_calls["put"] == 0:
-                        ambiguous_calls["put"] += 1
-                        raise storage_service.StorageCommitError(
-                            "Response lost after R2 commit",
-                            error_code="manifest_ack_lost",
-                            ambiguous=True,
+                def _run_ambiguous_scan_once() -> dict:
+                    ambiguous_calls = {"put": 0, "get": 0}
+
+                    def _commit_then_drop_ack(manifest, *, if_match=None, if_none_match_star=False):
+                        res = orig_put_manifest(
+                            manifest,
+                            if_match=if_match,
+                            if_none_match_star=if_none_match_star,
                         )
-                    return res
+                        if ambiguous_calls["put"] == 0:
+                            ambiguous_calls["put"] += 1
+                            raise storage_service.StorageCommitError(
+                                "Response lost after R2 commit",
+                                error_code="manifest_ack_lost",
+                                ambiguous=True,
+                            )
+                        return res
 
-                def _fail_reconcile_get_once():
-                    if ambiguous_calls["put"] == 1 and ambiguous_calls["get"] == 0:
-                        ambiguous_calls["get"] += 1
-                        raise storage_service.StorageUnavailableError(
-                            "Transient R2 outage during reconcile",
-                            error_code="r2_temp_down",
-                        )
-                    return orig_get_manifest()
+                    def _fail_reconcile_get_once():
+                        if ambiguous_calls["put"] == 1 and ambiguous_calls["get"] == 0:
+                            ambiguous_calls["get"] += 1
+                            raise storage_service.StorageUnavailableError(
+                                "Transient R2 outage during reconcile",
+                                error_code="r2_temp_down",
+                            )
+                        return orig_get_manifest()
 
-                r2.put_manifest = _commit_then_drop_ack
-                r2.get_manifest = _fail_reconcile_get_once
-                scan_ambiguous = test_app.state.watcher.scan_once(require_stability=False)
-                r2.put_manifest = orig_put_manifest
-                r2.get_manifest = orig_get_manifest
+                    r2.put_manifest = _commit_then_drop_ack
+                    r2.get_manifest = _fail_reconcile_get_once
+                    try:
+                        return test_app.state.watcher.scan_once(require_stability=False)
+                    finally:
+                        r2.put_manifest = orig_put_manifest
+                        r2.get_manifest = orig_get_manifest
+
+                scan_ambiguous = _run_ambiguous_scan_once()
                 self.assertEqual(scan_ambiguous["processed"], 0)
                 self.assertEqual(scan_ambiguous["skipped"], 1)
                 self.assertTrue(os.path.exists(inbox_file))
                 self.assertTrue(os.path.exists(f"{inbox_file}.opid"))
+                with open(f"{inbox_file}.opid", "r", encoding="utf-8") as fh:
+                    persisted_sidecar = fh.read().strip()
+                self.assertFalse(any(ch.isspace() for ch in persisted_sidecar))
 
                 # Reading existing .opid fails -> watcher must defer before ingesting instead of making a new ID.
                 orig_open = builtins.open
@@ -1276,7 +1323,7 @@ class R2PersistenceTests(unittest.TestCase):
                 self.assertEqual(ingest_spy_2.call_count, 0)
                 self.assertTrue(os.path.exists(inbox_file))
 
-                # Retry after I/O recovers -> reconciles + reuses existing .opid -> exactly 1 document!
+                # Retry after I/O recovers -> reconciles + reuses existing .opid (even for spaced Thai path) -> 1 doc!
                 scan_recover = test_app.state.watcher.scan_once(require_stability=False)
                 self.assertEqual(scan_recover["processed"], 1)
                 self.assertEqual(len(scan_recover["doc_ids"]), 1)
@@ -1284,8 +1331,30 @@ class R2PersistenceTests(unittest.TestCase):
                 self.assertFalse(os.path.exists(f"{inbox_file}.opid"))
                 self.assertEqual(client.get("/api/documents").json()["total"], 1)
 
+                # Legacy .opid sidecar containing spaces in rel_path must still be accepted on retry without corruption.
+                legacy_png = _make_png_bytes((55, 66, 77))
+                legacy_size = len(legacy_png)
+                legacy_sha = hashlib.sha256(legacy_png).hexdigest()
+                legacy_rel = "ครู อนุบาล 1/บิล เก่า f3r.png"
+                legacy_file = os.path.join(spaced_dir, "บิล เก่า f3r.png")
+                with open(legacy_file, "wb") as fh:
+                    fh.write(legacy_png)
+                legacy_op_id = f"watcher:{legacy_rel}:{legacy_size}:{legacy_sha}:deadbeef1234"
+                with open(f"{legacy_file}.opid", "w", encoding="utf-8") as fh:
+                    fh.write(f"{legacy_size}:{legacy_sha}:{legacy_op_id}\n")
+
+                scan_legacy_ambiguous = _run_ambiguous_scan_once()
+                self.assertEqual(scan_legacy_ambiguous["processed"], 0)
+                self.assertEqual(scan_legacy_ambiguous["skipped"], 1)
+
+                scan_legacy_recover = test_app.state.watcher.scan_once(require_stability=False)
+                self.assertEqual(scan_legacy_recover["processed"], 1)
+                self.assertFalse(os.path.exists(legacy_file))
+                self.assertFalse(os.path.exists(f"{legacy_file}.opid"))
+                self.assertEqual(client.get("/api/documents").json()["total"], 2)
+
                 # Corrupted .opid sidecar on disk must also defer before ingestion without quarantining.
-                corrupt_file = os.path.join(cfg.inbox_dir, "corrupt_f3r.png")
+                corrupt_file = os.path.join(cfg.inbox_dir, "corrupt f3r.png")
                 with open(corrupt_file, "wb") as fh:
                     fh.write(_make_png_bytes((99, 88, 77)))
                 with open(f"{corrupt_file}.opid", "w", encoding="utf-8") as fh:
@@ -1303,7 +1372,7 @@ class R2PersistenceTests(unittest.TestCase):
                 os.remove(f"{corrupt_file}.opid")
                 scan_corrupt_recovered = test_app.state.watcher.scan_once(require_stability=False)
                 self.assertEqual(scan_corrupt_recovered["processed"], 1)
-                self.assertEqual(client.get("/api/documents").json()["total"], 2)
+                self.assertEqual(client.get("/api/documents").json()["total"], 3)
 
 
 if __name__ == "__main__":
