@@ -4,6 +4,7 @@ from typing import Dict, Iterable, Optional, Tuple, Union
 from urllib.parse import urlparse
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_GEMINI_MODEL = "gemini-4-hydrogen"
 DEFAULT_AUTH_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 _TRUTHY_VALUES = {"1", "true", "yes", "on"}
 _FALSY_VALUES = {"0", "false", "no", "off"}
@@ -102,7 +103,7 @@ class AppConfig:
     auto_extract_on_ingest: bool = False
     llm_provider: str = "gemini"
     llm_api_key: str = ""
-    llm_model: str = "gemini-2.5-flash"
+    llm_model: str = DEFAULT_GEMINI_MODEL
     llm_base_url: str = ""
     line_channel_secret: str = ""
     line_channel_access_token: str = ""
@@ -182,7 +183,7 @@ class AppConfig:
             auto_extract_on_ingest=_parse_bool(os.environ.get("AUTO_EXTRACT_ON_INGEST"), True),
             llm_provider=(os.environ.get("LLM_PROVIDER") or "gemini").strip().lower(),
             llm_api_key=raw_api_key,
-            llm_model=(os.environ.get("LLM_MODEL") or "gemini-2.5-flash").strip(),
+            llm_model=(os.environ.get("LLM_MODEL") or "").strip() or DEFAULT_GEMINI_MODEL,
             llm_base_url=(os.environ.get("LLM_BASE_URL") or "").strip(),
             line_channel_secret=(os.environ.get("LINE_CHANNEL_SECRET") or "").strip(),
             line_channel_access_token=(os.environ.get("LINE_CHANNEL_ACCESS_TOKEN") or "").strip(),

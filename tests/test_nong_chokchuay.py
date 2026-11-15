@@ -410,14 +410,20 @@ class NongChokChuayTests(unittest.TestCase):
         )
         self.assertIn("ครูพิ้งกี้", pb["reply_text"])
 
-        # Configured Gemini 2.5 Flash sends systemInstruction containing ครูพิ้งกี้
+        # Default Gemini 4 Hydrogen sends natural Thai kindergarten sidekick systemInstruction
+        self.assertIn("น้องโชค", sys_inst)
+        self.assertIn("อนุบาล", sys_inst)
+        self.assertIn("ผู้ปกครอง", sys_inst)
+        self.assertIn("แพ้อาหาร", sys_inst)
+        self.assertIn('ห้ามขึ้นต้นด้วย "สวัสดีครับครูพิ้งกี้" ซ้ำๆ', sys_inst)
+
         ai_cfg = AppConfig.from_dir(
             self._tmp.name,
             llm_provider="gemini",
             llm_api_key="fake-gemini-key",
-            llm_model="gemini-2.5-flash",
             teacher_name="ครูพิ้งกี้",
         )
+        self.assertEqual(ai_cfg.llm_model, "gemini-4-hydrogen")
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.raise_for_status.return_value = None
@@ -426,7 +432,8 @@ class NongChokChuayTests(unittest.TestCase):
                 {
                     "content": {
                         "parts": [
-                            {"text": "สวัสดีครับครูพิ้งกี้! น้องโชคเช็กให้แล้ว มีเอกสารรอตรวจ 1 ฉบับครับ"}
+                            {"thought": True, "text": "คิดหาคำพูดเป็นกันเอง..."},
+                            {"text": "ได้เลยครับ เดี๋ยวน้องโชคร่างข้อความแจ้งผู้ปกครองให้ทันทีนะครับ"},
                         ]
                     }
                 }
@@ -435,18 +442,40 @@ class NongChokChuayTests(unittest.TestCase):
 
         with patch("line_service.requests.post", return_value=mock_resp) as mock_post:
             res_ai = line_service.process_line_text_command(
-                "สวัสดีครับน้องโชค วันนี้มีอะไรต้องตรวจไหม",
+                "ช่วยคิดข้อความแจ้งผู้ปกครองในไลน์กลุ่มหน่อยสิ",
                 db_path=self.cfg.db_path,
                 config=ai_cfg,
             )
 
         self.assertEqual(res_ai["intent"], "ai_chat")
-        self.assertIn("ครูพิ้งกี้", res_ai["reply_text"])
+        self.assertEqual(res_ai["model"], "gemini-4-hydrogen")
+        self.assertEqual(res_ai["reply_text"], "ได้เลยครับ เดี๋ยวน้องโชคร่างข้อความแจ้งผู้ปกครองให้ทันทีนะครับ")
+        self.assertNotIn("คิดหาคำพูด", res_ai["reply_text"])
+        self.assertFalse(res_ai["reply_text"].startswith("สวัสดีครับครูพิ้งกี้!"))
         mock_post.assert_called_once()
         called_url = mock_post.call_args.args[0]
         called_json = mock_post.call_args.kwargs["json"]
-        self.assertIn("models/gemini-2.5-flash:generateContent", called_url)
+        self.assertIn("models/gemini-4-hydrogen:generateContent", called_url)
+        self.assertEqual(mock_post.call_args.kwargs["timeout"], 20)
+        self.assertEqual(called_json["generationConfig"]["temperature"], 0.65)
+        self.assertEqual(called_json["generationConfig"]["maxOutputTokens"], 2048)
         self.assertIn("ครูพิ้งกี้", called_json["systemInstruction"]["parts"][0]["text"])
+
+        # Truncated MAX_TOKENS candidate without parts returns None cleanly for fallback
+        truncated_resp = MagicMock()
+        truncated_resp.status_code = 200
+        truncated_resp.raise_for_status.return_value = None
+        truncated_resp.json.return_value = {
+            "candidates": [{"content": {"role": "model"}, "finishReason": "MAX_TOKENS"}]
+        }
+        with patch("line_service.requests.post", return_value=truncated_resp):
+            self.assertIsNone(
+                line_service.generate_nong_chok_ai_reply(
+                    "สรุปงาน",
+                    db_context="ไม่มี",
+                    config=ai_cfg,
+                )
+            )
 
 
 if __name__ == "__main__":

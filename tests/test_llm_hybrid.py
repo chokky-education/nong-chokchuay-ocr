@@ -42,7 +42,7 @@ class LlmHybridAdapterTest(unittest.TestCase):
                 auto_extract_on_ingest=True,
                 llm_provider="gemini",
                 llm_api_key="fake-gemini-key",
-                llm_model="gemini-2.5-flash",
+                llm_model="gemini-4-hydrogen",
             )
             test_app = create_app(config=cfg, engine_factory=lambda: FakeLineOCR(text=ocr_text))
 
@@ -176,13 +176,16 @@ class LlmHybridAdapterTest(unittest.TestCase):
             env_path = os.path.join(tmpdir, ".env")
             with open(env_path, "w", encoding="utf-8") as fh:
                 fh.write("LLM_API_KEY=\n")
+                fh.write("LLM_MODEL=   \n")
                 fh.write("GEMINI_API_KEY=from-dotenv-gemini-key\n")
+                fh.write("AUTH_REQUIRED=false\n")
 
             with patch.object(config, "BASE_DIR", tmpdir):
                 with patch.dict(os.environ, {"OPENTHAI_DATA_DIR": tmpdir}, clear=True):
                     cfg = AppConfig.from_env()
                     self.assertTrue(cfg.auto_extract_on_ingest)
                     self.assertEqual(cfg.llm_api_key, "from-dotenv-gemini-key")
+                    self.assertEqual(cfg.llm_model, "gemini-4-hydrogen")
 
             # Also ensure a later non-empty LLM_API_KEY overrides an earlier empty LLM_API_KEY= line
             with open(env_path, "a", encoding="utf-8") as fh:
@@ -192,6 +195,63 @@ class LlmHybridAdapterTest(unittest.TestCase):
                 with patch.dict(os.environ, {"OPENTHAI_DATA_DIR": tmpdir}, clear=True):
                     cfg2 = AppConfig.from_env()
                     self.assertEqual(cfg2.llm_api_key, "later-nonempty-key")
+                    self.assertEqual(cfg2.llm_model, "gemini-4-hydrogen")
+
+    def test_gemini_4_hydrogen_skips_thought_parts_and_uses_default_model(self) -> None:
+        llm_json = {
+            "is_expense": True,
+            "doc_category": "receipt",
+            "tags": ["ครูอนุบาล", "เบิกโรงเรียน"],
+            "merchant": "ร้านสมใจเครื่องเขียน",
+            "expense_date": "2026-11-15",
+            "subtotal": 320.0,
+            "vat_amount": 0.0,
+            "total_amount": 320.0,
+            "currency": "THB",
+            "expense_category": "classroom",
+        }
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {"thought": True, "text": "วิเคราะห์ใบเสร็จเครื่องเขียน..."},
+                            {"text": json.dumps(llm_json, ensure_ascii=False)},
+                        ]
+                    }
+                }
+            ]
+        }
+
+        with make_temp_data_dir() as tmpdir:
+            cfg = AppConfig.from_dir(
+                tmpdir,
+                inbox_poll_seconds=0,
+                auto_extract_on_ingest=True,
+                llm_api_key="fake-gemini-key",
+            )
+            self.assertEqual(cfg.llm_model, "gemini-4-hydrogen")
+            test_app = create_app(
+                config=cfg,
+                engine_factory=lambda: FakeLineOCR(text="ร้านสมใจเครื่องเขียน 320.00 บาท"),
+            )
+            with patch("extractor.requests.post", return_value=mock_resp) as mock_post:
+                with TestClient(test_app) as client:
+                    up = client.post(
+                        "/api/ocr",
+                        files={"file": ("stationery.png", make_png_bytes(300, 300), "image/png")},
+                    )
+                    self.assertEqual(up.status_code, 200)
+                    self.assertEqual(up.json()["expense"]["extraction_method"], "llm")
+                    self.assertEqual(up.json()["expense"]["merchant"], "ร้านสมใจเครื่องเขียน")
+
+                self.assertIn("models/gemini-4-hydrogen:generateContent", mock_post.call_args.args[0])
+                self.assertEqual(mock_post.call_args.kwargs["timeout"], 20)
+                gen_cfg = mock_post.call_args.kwargs["json"]["generationConfig"]
+                self.assertEqual(gen_cfg["maxOutputTokens"], 4096)
 
 
 if __name__ == "__main__":
