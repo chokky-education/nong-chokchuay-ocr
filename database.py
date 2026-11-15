@@ -819,11 +819,14 @@ def _format_expense_row(
     return out
 
 
-def _default_reimbursement_status(expense_category: str, doc_tags: List[str]) -> str:
+def _default_reimbursement_status(
+    expense_category: str, doc_tags: List[str], *, db_path: Optional[str] = None
+) -> str:
     if "ส่วนตัว" in doc_tags and expense_category not in {"classroom", "kids_snack"}:
         return "personal"
-    if expense_category in {"classroom", "kids_snack"} or "เบิกโรงเรียน" in doc_tags:
-        return "pending_reimbursement"
+    settings = get_teacher_settings(db_path)
+    if settings["configured"]:
+        return settings["default_reimbursement_status"]
     return "pending_reimbursement"
 
 
@@ -876,7 +879,7 @@ def upsert_expense(
     elif existing and existing["reimbursement_status"]:
         resolved_reimb = existing["reimbursement_status"]
     else:
-        resolved_reimb = _default_reimbursement_status(clean_exp_cat, doc_tags)
+        resolved_reimb = _default_reimbursement_status(clean_exp_cat, doc_tags, db_path=db_path)
 
     if budget_source and budget_source.strip():
         resolved_budget = budget_source.strip()

@@ -753,3 +753,27 @@ test('a LINE settings deep link survives a Google login round trip in this tab',
   assert.equal(sessionStorageData.has('nong-chok-pending-view'), false);
   assert.equal(afterCallback.replaceStateCalls.at(-1), '/?view=settings');
 });
+
+test('opening a vault document from settings returns to the visible teacher desk', async () => {
+  const doc = { id: 'review-doc', filename: 'review.png', text: 'ต้นฉบับที่ต้องตรวจ',
+    category: 'general', tags: [], lines: [], review_status: 'pending_review' };
+  const { getEl, body, windowMock } = runFrontendApp({ search: '?view=settings', fetchImpl: async (url) => {
+    if (url === '/api/documents/review-doc') return jsonResponse(200, { document: doc });
+    if (url.startsWith('/api/documents?')) return jsonResponse(200, { documents: [doc], db_stats: { total_documents: 1 } });
+    return richMenuFetch(url);
+  } });
+  await flushMicrotasks();
+  assert.equal(body.dataset.view, 'settings');
+  const openButton = createMockElement('open-document');
+  openButton.dataset.docId = doc.id;
+  getEl('docs-list').querySelectorAll = (selector) => selector === '.doc-open-btn' ? [openButton] : [];
+  await getEl('btn-open-db').trigger('click');
+  await flushMicrotasks();
+  assert.equal(getEl('db-modal').style.display, 'flex');
+  await openButton.trigger('click');
+  assert.equal(body.dataset.view, '');
+  assert.equal(getEl('settings-page').hidden, true);
+  assert.equal(getEl('db-modal').style.display, 'none');
+  assert.equal(getEl('ocr-text-result').value, doc.text);
+  assert.equal(new URL(windowMock.location.href).searchParams.has('view'), false);
+});
