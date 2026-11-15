@@ -23,6 +23,15 @@
 
 ## 2. สิ่งที่ค้างอยู่และงานถัดไป (Pending Items)
 
+### งานคำถามธรรมชาติ → Mascot Messaging Cards (2026-11-15, ยังไม่ release)
+
+- เพิ่มกฎอ่านข้อความใน `line_service.py` ก่อนเรียก LLM สำหรับคำถามที่ขอดูยอดเบิก/รายชื่อเด็กแพ้อาหาร/เอกสารรอตรวจ เช่น “มียอดรอเบิกเท่าไหร่”, “ใครแพ้อาหารบ้าง” และ “มีเอกสารรอตรวจไหม” พร้อมคำลงท้ายสุภาพและการเว้นวรรค
+- ใช้ตัวสร้างการ์ดเดิมและ `storage.execute_read` ร่วมกันทั้ง LINE Webhook และตัวจำลองแชท จึงใช้ข้อมูลจาก SQLite โดยไม่เรียกบริการ LLM สำหรับคำถามที่รองรับ
+- กฎจับทั้งประโยค ไม่จับเพียงคำที่โผล่อยู่ในข้อความ คำสั่งค้นหาโดยตรงและคำขอให้ AI ช่วยเขียนยังใช้เส้นทางเดิม ส่วนประโยคที่มีหลายคำถามหรืออยู่นอกกฎยังอาจตอบเป็นข้อความจาก AI
+- ผลตรวจในเครื่อง: Python syntax และชุดทดสอบ 59 ข้อผ่าน, JavaScript syntax และชุดทดสอบ Worker/Frontend 13 ข้อผ่าน รวม regression tests สำหรับเปิด/ปิด LLM, ข้อมูลยอดเงิน/ชื่อเด็กในฐานทดสอบ, ฐานข้อมูลว่าง, LINE Flex payload, read lock และการคงพฤติกรรมค้นหา/ช่วยเขียน
+- ตรวจผ่าน HTTP กับเซิร์ฟเวอร์และฐานข้อมูลทดสอบที่แยกต่างหาก: คำถามตัวอย่างทั้ง 3 แบบได้ HTTP 200 และ LINE Flex Card ตามประเภท รีสตาร์ตเซิร์ฟเวอร์หลักในเครื่องพอร์ต 8765 เป็นโค้ดล่าสุดแล้ว (`/api/health` ตอบ `READY`) แต่ตัวในเครื่องยังไม่มี Google OAuth จึงตอบ 401 เมื่อเรียก Simulator โดยไม่ล็อกอิน ไม่ได้เปลี่ยนค่าล็อกอินเพื่อข้ามการตรวจนี้
+- สถานะ release: ยังไม่ merge/deploy ต้องตรวจ CI ใน PR และได้รับอนุมัติจากเจ้าของก่อน การส่งการ์ดไปยัง LINE OA จริงและผลบน Cloudflare ยังไม่ได้ตรวจในงานนี้
+
 1. **ตั้งค่า Google OAuth 2.0 Credentials และค่าลับบน Cloudflare (Wrangler Secrets):**
    - สร้าง OAuth Client ID (Web application) ใน Google Cloud Console พร้อม Authorized redirect URI: `https://nong-chokchuay-ocr.entrace-space.workers.dev/api/auth/google/callback`
    - ตั้งค่า secret ด้วย Wrangler ก่อนใช้งานจริง: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `AUTH_SESSION_SECRET`, `ALLOWED_LINE_USER_IDS`, `LINE_CHANNEL_SECRET`, `LINE_CHANNEL_ACCESS_TOKEN`, และ `LLM_API_KEY`
