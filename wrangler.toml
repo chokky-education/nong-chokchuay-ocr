@@ -29,7 +29,7 @@ LINE_ALLOW_GROUP_CHATS = "false"
 AUTO_EXTRACT_ON_INGEST = "true"
 PUBLIC_BASE_URL = "https://nong-chokchuay-ocr.entrace-space.workers.dev"
 LLM_PROVIDER = "gemini"
-LLM_MODEL = "gemini-2.5-flash"
+LLM_MODEL = "gemini-4-hydrogen"
 TEACHER_NAME = "ครูพิ้งกี้"
 
 # Secrets to configure via Wrangler CLI before deploying:

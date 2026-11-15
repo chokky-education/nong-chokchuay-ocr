@@ -4,9 +4,22 @@ from typing import Dict, Iterable, Optional, Tuple, Union
 from urllib.parse import urlparse
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_GEMINI_MODEL = "gemini-4-hydrogen"
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_AUTH_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 _TRUTHY_VALUES = {"1", "true", "yes", "on"}
 _FALSY_VALUES = {"0", "false", "no", "off"}
+
+
+def resolve_llm_provider_and_model(
+    raw_provider: Optional[object],
+    raw_model: Optional[object],
+) -> Tuple[str, str]:
+    """Normalize LLM provider and apply provider-aware default model when blank."""
+    provider = str(raw_provider or "").strip().lower() or "gemini"
+    default_model = DEFAULT_GEMINI_MODEL if provider == "gemini" else DEFAULT_OPENAI_MODEL
+    model = str(raw_model or "").strip() or default_model
+    return provider, model
 
 
 def load_dotenv_file(env_path: Optional[str] = None) -> Dict[str, str]:
@@ -102,7 +115,7 @@ class AppConfig:
     auto_extract_on_ingest: bool = False
     llm_provider: str = "gemini"
     llm_api_key: str = ""
-    llm_model: str = "gemini-2.5-flash"
+    llm_model: str = DEFAULT_GEMINI_MODEL
     llm_base_url: str = ""
     line_channel_secret: str = ""
     line_channel_access_token: str = ""
@@ -134,8 +147,13 @@ class AppConfig:
                     setattr(cfg, key, _parse_csv_tuple(value, lowercase=True))  # type: ignore[arg-type]
                 elif key == "allowed_line_user_ids":
                     setattr(cfg, key, _parse_csv_tuple(value, lowercase=False))  # type: ignore[arg-type]
+                elif key in {"llm_provider", "llm_model"}:
+                    continue
                 else:
                     setattr(cfg, key, value)
+        raw_provider = overrides.get("llm_provider", cfg.llm_provider)
+        raw_model = overrides["llm_model"] if "llm_model" in overrides else ""
+        cfg.llm_provider, cfg.llm_model = resolve_llm_provider_and_model(raw_provider, raw_model)
         return cfg
 
     @classmethod
@@ -180,9 +198,9 @@ class AppConfig:
             data_dir=data_dir,
             inbox_poll_seconds=poll_seconds,
             auto_extract_on_ingest=_parse_bool(os.environ.get("AUTO_EXTRACT_ON_INGEST"), True),
-            llm_provider=(os.environ.get("LLM_PROVIDER") or "gemini").strip().lower(),
+            llm_provider=os.environ.get("LLM_PROVIDER"),
             llm_api_key=raw_api_key,
-            llm_model=(os.environ.get("LLM_MODEL") or "gemini-2.5-flash").strip(),
+            llm_model=os.environ.get("LLM_MODEL"),
             llm_base_url=(os.environ.get("LLM_BASE_URL") or "").strip(),
             line_channel_secret=(os.environ.get("LINE_CHANNEL_SECRET") or "").strip(),
             line_channel_access_token=(os.environ.get("LINE_CHANNEL_ACCESS_TOKEN") or "").strip(),

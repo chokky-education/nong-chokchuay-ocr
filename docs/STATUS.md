@@ -13,9 +13,9 @@
 - **ถาดรอตรวจ (Review Queue):** แยกเอกสารที่เพิ่งสแกน (`review_status = 'pending_review'`) ให้คุณครูกดตรวจยืนยันได้ในคลิกเดียว (`'reviewed'`)
 - **สมุดเบิกจ่ายคุณครูอนุบาล (Expense & Reimbursement Tracker):** สกัดข้อมูลใบเสร็จ แยกสถานะรอเบิกคืนโรงเรียน (`pending_reimbursement`), เบิกคืนแล้ว (`reimbursed`), และรายจ่ายส่วนตัว (`personal`) พร้อมส่งออก CSV (UTF-8 BOM)
 - **แฟ้มทะเบียนเด็กอนุบาลและแจ้งเตือนแพ้อาหาร (Student Profiles):** สกัดชื่อ-นามสกุล ชื่อเล่น เลขบัตรประชาชน 13 หลัก วันเกิด (พ.ศ. → ค.ศ.) ห้องเรียน เบอร์ผู้ปกครอง และป้ายเตือนแพ้อาหาร/โรคประจำตัว
-- **ช่องทาง LINE OA และตัวจำลองแชท (LINE Webhook & Web Simulator):** รับภาพและคำสั่งค้นหาผ่าน `/api/line/webhook` (ตอบกลับฟรีด้วย `replyToken` เป็น Flex Card พร้อมปุ่ม Postback และ `openExternalBrowser=1`) และจำลองการคุยกับ "ครูพิ้งกี้" บนหน้าเว็บผ่าน `/api/line/simulate`
+- **ช่องทาง LINE OA และตัวจำลองแชท (LINE Webhook & Web Simulator):** รับภาพและคำสั่งค้นหาผ่าน `/api/line/webhook` (ตอบกลับฟรีด้วย `replyToken` เป็น Flex Card พร้อมปุ่ม Postback และ `openExternalBrowser=1`) และจำลองการคุยกับ "ครูพิ้งกี้" บนหน้าเว็บผ่าน `/api/line/simulate` ด้วยบุคลิกผู้ช่วยครูอนุบาลรุ่นน้องคู่ใจที่เป็นธรรมชาติ (`gemini-4-hydrogen`)
 - **ระบบยืนยันตัวตนและความปลอดภัย (Google OAuth + LINE Allowlist):** จำกัดสิทธิ์เข้าใช้งานเว็บเฉพาะอีเมล Google ที่ยืนยันแล้ว 2 บัญชี (`ALLOWED_EMAILS`), เก็บ session ใน SQLite (`auth_sessions`) พร้อม `HttpOnly` cookie, ตรวจ Origin + CSRF token (`X-CSRF-Token`), ยกเลิก session ทันทีเมื่อ Logout, ปฏิเสธการเข้าถึงเป็นค่าเริ่มต้นเมื่อเปิด `AUTH_REQUIRED=true` (fail-closed) รวมถึงจำกัดผู้ส่ง LINE OA ด้วย `ALLOWED_LINE_USER_IDS` และแชทส่วนตัว 1-on-1 (`LINE_ALLOW_GROUP_CHATS=false`)
-- **ตัวสกัดข้อมูลแบบผสม (Hybrid Extractor):** ใช้ Offline Thai Regex เป็นฐานหลัก และรองรับ Text-only LLM เสริม (`gemini-2.5-flash` เป็นค่าเริ่มต้นเมื่อตั้งค่า `LLM_API_KEY` หรือ `GEMINI_API_KEY`)
+- **ตัวสกัดข้อมูลแบบผสม (Hybrid Extractor):** ใช้ Offline Thai Regex เป็นฐานหลัก และรองรับ Text-only LLM เสริม (`gemini-4-hydrogen` เป็นค่าเริ่มต้นพร้อมตัวกรองโหมดคิดวิเคราะห์ `thinking` เมื่อตั้งค่า `LLM_API_KEY` หรือ `GEMINI_API_KEY`)
 - **ระบบกติกาการทำงานของ AI Agent:** ตั้งค่า `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `INDEX.md`, `GLOSSARY.md`, `CODING_STANDARDS.md`, `docs/STATUS.md` และ `docs/release-workflow.md` ครบชุด
 
 ---

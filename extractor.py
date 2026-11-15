@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from config import AppConfig
+from config import AppConfig, DEFAULT_GEMINI_MODEL, resolve_llm_provider_and_model
 
 THAI_MONTHS = {
     "ม.ค.": 1, "มค": 1, "มกราคม": 1,
@@ -161,7 +161,8 @@ _MEDICAL_KEYWORDS = (
 
 def is_llm_configured(config: AppConfig) -> bool:
     """Return True when a cloud LLM API key or local OpenAI-compatible URL is configured."""
-    return bool(config.llm_api_key or (config.llm_provider != "gemini" and config.llm_base_url))
+    provider, _ = resolve_llm_provider_and_model(config.llm_provider, config.llm_model)
+    return bool(config.llm_api_key or (provider != "gemini" and config.llm_base_url))
 
 
 def _normalize_year(raw_year: int) -> int:
@@ -690,17 +691,38 @@ _LLM_SYSTEM_PROMPT = (
 )
 
 
+def extract_gemini_text(payload: Dict[str, Any]) -> str:
+    """Extract non-thought text parts from a Gemini generateContent JSON payload."""
+    if not isinstance(payload, dict):
+        return ""
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return ""
+    first = candidates[0] if isinstance(candidates[0], dict) else {}
+    content = first.get("content") if isinstance(first.get("content"), dict) else {}
+    parts = content.get("parts")
+    if not isinstance(parts, list):
+        return ""
+    chunks: List[str] = []
+    for part in parts:
+        if not isinstance(part, dict) or part.get("thought") is True:
+            continue
+        text = part.get("text")
+        if isinstance(text, str) and text:
+            chunks.append(text)
+    return "".join(chunks)
+
+
 def extract_with_llm(text: str, config: AppConfig) -> Dict[str, Any]:
     """Call optional text-only LLM API (Gemini or OpenAI-compatible/Ollama) using OCR text only."""
     if not is_llm_configured(config):
         raise ValueError("LLM endpoint is not configured")
 
     prompt_text = f"{_LLM_SYSTEM_PROMPT}\n\nOCR_TEXT:\n{text[:8000]}"
-    provider = (config.llm_provider or "gemini").lower()
+    provider, model = resolve_llm_provider_and_model(config.llm_provider, config.llm_model)
 
     if provider == "gemini":
         base = (config.llm_base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
-        model = config.llm_model or "gemini-2.5-flash"
         url = f"{base}/models/{model}:generateContent"
         resp = requests.post(
             url,
@@ -709,14 +731,17 @@ def extract_with_llm(text: str, config: AppConfig) -> Dict[str, Any]:
                 "contents": [{"parts": [{"text": prompt_text}]}],
                 "generationConfig": {
                     "temperature": 0.1,
+                    "maxOutputTokens": 4096,
                     "responseMimeType": "application/json",
                 },
             },
-            timeout=15,
+            timeout=20,
         )
         resp.raise_for_status()
         payload = resp.json()
-        raw_content = payload["candidates"][0]["content"]["parts"][0]["text"]
+        raw_content = extract_gemini_text(payload)
+        if not raw_content.strip():
+            raise ValueError("Gemini returned empty response")
     else:
         base = (config.llm_base_url or "https://api.openai.com/v1").rstrip("/")
         url = f"{base}/chat/completions"
@@ -727,7 +752,7 @@ def extract_with_llm(text: str, config: AppConfig) -> Dict[str, Any]:
             url,
             headers=headers,
             json={
-                "model": config.llm_model or "gpt-4o-mini",
+                "model": model,
                 "temperature": 0.1,
                 "response_format": {"type": "json_object"},
                 "messages": [
@@ -735,7 +760,7 @@ def extract_with_llm(text: str, config: AppConfig) -> Dict[str, Any]:
                     {"role": "user", "content": f"OCR_TEXT:\n{text[:8000]}"},
                 ],
             },
-            timeout=15,
+            timeout=20,
         )
         resp.raise_for_status()
         payload = resp.json()
