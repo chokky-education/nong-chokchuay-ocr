@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 import requests
 
 import database
-from config import AppConfig, DEFAULT_GEMINI_MODEL
+from config import AppConfig, DEFAULT_GEMINI_MODEL, resolve_llm_provider_and_model
 from extractor import extract_gemini_text
 
 DEFAULT_TEACHER_NAME = "ครูพิ้งกี้"
@@ -116,7 +116,7 @@ def generate_nong_chok_ai_reply(
     """Generate a warm Gemini Flash reply using Nong Chok's systemInstruction."""
     if config is None:
         return None
-    provider = (config.llm_provider or "gemini").strip().lower()
+    provider, model = resolve_llm_provider_and_model(config.llm_provider, config.llm_model)
     api_key = (config.llm_api_key or "").strip()
     if not api_key and not (provider != "gemini" and (config.llm_base_url or "").strip()):
         return None
@@ -128,7 +128,6 @@ def generate_nong_chok_ai_reply(
     try:
         if provider == "gemini":
             base = (config.llm_base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
-            model = (config.llm_model or "").strip() or DEFAULT_GEMINI_MODEL
             url = f"{base}/models/{model}:generateContent"
             resp = requests.post(
                 url,
@@ -156,7 +155,7 @@ def generate_nong_chok_ai_reply(
                 url,
                 headers=headers,
                 json={
-                    "model": (config.llm_model or "").strip() or "gpt-4o-mini",
+                    "model": model,
                     "temperature": 0.65,
                     "messages": [
                         {"role": "system", "content": system_instruction},
@@ -538,9 +537,14 @@ def process_line_text_command(
             teacher_name=target_teacher,
         )
         if ai_reply:
+            resolved_model = (
+                resolve_llm_provider_and_model(config.llm_provider, config.llm_model)[1]
+                if config
+                else DEFAULT_GEMINI_MODEL
+            )
             return {
                 "intent": "ai_chat",
-                "model": ((config.llm_model or "").strip() or DEFAULT_GEMINI_MODEL) if config else DEFAULT_GEMINI_MODEL,
+                "model": resolved_model,
                 "reply_text": ai_reply,
                 "line_messages": [{"type": "text", "text": ai_reply}],
                 "actions": [],

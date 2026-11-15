@@ -477,6 +477,26 @@ class NongChokChuayTests(unittest.TestCase):
                 )
             )
 
+        # OpenAI provider with blank llm_model defaults to gpt-4o-mini consistently in request and response metadata
+        oa_cfg = AppConfig.from_dir(
+            self._tmp.name,
+            llm_provider="openai",
+            llm_api_key="fake-oa-key",
+            llm_model="   ",
+        )
+        oa_resp = MagicMock()
+        oa_resp.status_code = 200
+        oa_resp.raise_for_status.return_value = None
+        oa_resp.json.return_value = {"choices": [{"message": {"content": "รับทราบครับครูพิ้งกี้"}}]}
+        with patch("line_service.requests.post", return_value=oa_resp) as mock_oa_post:
+            res_oa = line_service.process_line_text_command(
+                "ช่วยเช็กงานหน่อย",
+                db_path=self.cfg.db_path,
+                config=oa_cfg,
+            )
+        self.assertEqual(res_oa["model"], "gpt-4o-mini")
+        self.assertEqual(mock_oa_post.call_args.kwargs["json"]["model"], "gpt-4o-mini")
+
 
 if __name__ == "__main__":
     unittest.main()

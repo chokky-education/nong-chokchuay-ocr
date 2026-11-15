@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from config import AppConfig, DEFAULT_GEMINI_MODEL
+from config import AppConfig, DEFAULT_GEMINI_MODEL, resolve_llm_provider_and_model
 
 THAI_MONTHS = {
     "ม.ค.": 1, "มค": 1, "มกราคม": 1,
@@ -161,7 +161,8 @@ _MEDICAL_KEYWORDS = (
 
 def is_llm_configured(config: AppConfig) -> bool:
     """Return True when a cloud LLM API key or local OpenAI-compatible URL is configured."""
-    return bool(config.llm_api_key or (config.llm_provider != "gemini" and config.llm_base_url))
+    provider, _ = resolve_llm_provider_and_model(config.llm_provider, config.llm_model)
+    return bool(config.llm_api_key or (provider != "gemini" and config.llm_base_url))
 
 
 def _normalize_year(raw_year: int) -> int:
@@ -718,11 +719,10 @@ def extract_with_llm(text: str, config: AppConfig) -> Dict[str, Any]:
         raise ValueError("LLM endpoint is not configured")
 
     prompt_text = f"{_LLM_SYSTEM_PROMPT}\n\nOCR_TEXT:\n{text[:8000]}"
-    provider = (config.llm_provider or "gemini").lower()
+    provider, model = resolve_llm_provider_and_model(config.llm_provider, config.llm_model)
 
     if provider == "gemini":
         base = (config.llm_base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
-        model = (config.llm_model or "").strip() or DEFAULT_GEMINI_MODEL
         url = f"{base}/models/{model}:generateContent"
         resp = requests.post(
             url,
@@ -752,7 +752,7 @@ def extract_with_llm(text: str, config: AppConfig) -> Dict[str, Any]:
             url,
             headers=headers,
             json={
-                "model": (config.llm_model or "").strip() or "gpt-4o-mini",
+                "model": model,
                 "temperature": 0.1,
                 "response_format": {"type": "json_object"},
                 "messages": [

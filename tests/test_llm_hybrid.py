@@ -253,6 +253,36 @@ class LlmHybridAdapterTest(unittest.TestCase):
                 gen_cfg = mock_post.call_args.kwargs["json"]["generationConfig"]
                 self.assertEqual(gen_cfg["maxOutputTokens"], 4096)
 
+    def test_provider_whitespace_and_openai_blank_model_resolution(self) -> None:
+        import os
+        import config
+
+        with make_temp_data_dir() as tmpdir:
+            env_path = os.path.join(tmpdir, ".env")
+            with open(env_path, "w", encoding="utf-8") as fh:
+                fh.write("LLM_PROVIDER=   \n")
+                fh.write("LLM_MODEL=   \n")
+                fh.write("LLM_API_KEY=fake-key\n")
+                fh.write("AUTH_REQUIRED=false\n")
+
+            with patch.object(config, "BASE_DIR", tmpdir):
+                with patch.dict(os.environ, {"OPENTHAI_DATA_DIR": tmpdir}, clear=True):
+                    cfg_ws = AppConfig.from_env()
+                    self.assertEqual(cfg_ws.llm_provider, "gemini")
+                    self.assertEqual(cfg_ws.llm_model, "gemini-4-hydrogen")
+
+            with open(env_path, "w", encoding="utf-8") as fh:
+                fh.write("LLM_PROVIDER=openai\n")
+                fh.write("LLM_MODEL=   \n")
+                fh.write("LLM_API_KEY=fake-openai-key\n")
+                fh.write("AUTH_REQUIRED=false\n")
+
+            with patch.object(config, "BASE_DIR", tmpdir):
+                with patch.dict(os.environ, {"OPENTHAI_DATA_DIR": tmpdir}, clear=True):
+                    cfg_oa = AppConfig.from_env()
+                    self.assertEqual(cfg_oa.llm_provider, "openai")
+                    self.assertEqual(cfg_oa.llm_model, "gpt-4o-mini")
+
 
 if __name__ == "__main__":
     unittest.main()
