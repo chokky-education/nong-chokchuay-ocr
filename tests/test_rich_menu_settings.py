@@ -182,6 +182,32 @@ class RichMenuSettingsTests(unittest.TestCase):
         self.assertEqual(self.client.post(f"/api/documents/{doc_id}/extract").status_code, 200)
         self.assertEqual(self.client.get(f"/api/documents/{doc_id}").json()["document"]["expense"]["reimbursement_status"], "reimbursed")
 
+    def test_manual_api_expense_creation_uses_defaults_without_overwriting_explicit_or_existing_status(self):
+        self.save()
+        def new_document():
+            response = self.client.post("/api/ocr", data={"auto_extract": "false"},
+                files={"file": ("new-bill.png", make_png_bytes(), "image/png")})
+            self.assertEqual(response.status_code, 200)
+            return response.json()["doc_id"]
+
+        payload = {"merchant": "ร้านทดสอบ", "total_amount": 100, "expense_category": "classroom"}
+        doc_id = new_document()
+        created = self.client.put(f"/api/expenses/{doc_id}", json=payload)
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(created.json()["expense"]["reimbursement_status"], "personal")
+        self.assertEqual(created.json()["expense"]["budget_source"], "personal")
+
+        explicit_id = new_document()
+        explicit = self.client.put(f"/api/expenses/{explicit_id}",
+            json={**payload, "reimbursement_status": "pending_reimbursement"})
+        self.assertEqual(explicit.json()["expense"]["reimbursement_status"], "pending_reimbursement")
+        self.assertEqual(explicit.json()["expense"]["budget_source"], "classroom")
+
+        self.save(default_reimbursement_status="pending_reimbursement")
+        updated = self.client.put(f"/api/expenses/{doc_id}", json={**payload, "total_amount": 200})
+        self.assertEqual(updated.json()["expense"]["reimbursement_status"], "personal")
+        self.assertEqual(updated.json()["expense"]["total_amount"], 200)
+
     def test_v4_snapshot_missing_settings_table_is_rejected(self):
         with database.get_db_connection(self.cfg.db_path) as conn:
             conn.execute("DROP TABLE teacher_settings")

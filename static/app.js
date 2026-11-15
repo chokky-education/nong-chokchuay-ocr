@@ -973,6 +973,8 @@
     showLoading(true, 'น้องโชคกำลังหยิบเอกสารจากตู้เซฟ...');
     try {
       const res = await apiFetch(`/api/documents/${encodeURIComponent(docId)}`);
+      if (authState.required && !authState.authenticated) return;
+      await openWorkspaceView('');
       state.currentFile = null;
       renderDocumentResult(res.document);
       closeModal(els.dbModal);
