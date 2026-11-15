@@ -1327,7 +1327,16 @@ def create_app(
     def serve_index():
         index_file = os.path.join(STATIC_DIR, "index.html")
         if os.path.exists(index_file):
-            return FileResponse(index_file)
+            with open(index_file, encoding="utf-8") as fh:
+                html = fh.read()
+            # A new content URL prevents a fresh browser cache entry from retaining old UI logic.
+            for asset in ("app.js", "styles.css"):
+                asset_file = os.path.join(STATIC_DIR, asset)
+                if os.path.isfile(asset_file):
+                    with open(asset_file, "rb") as fh:
+                        version = hashlib.sha256(fh.read()).hexdigest()[:16]
+                    html = html.replace(f'"/static/{asset}"', f'"/static/{asset}?v={version}"')
+            return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
         return HTMLResponse("<h1>น้องโชคช่วย</h1><p>Web UI is initializing...</p>")
 
     return application
