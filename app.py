@@ -1000,6 +1000,11 @@ def create_app(
             reply_obj: Optional[Dict[str, Any]] = None
             event_uid = str(event.get("webhookEventId") or "").strip()
 
+            message_type = (event.get("message") or {}).get("type")
+            supported = (etype == "message" and message_type in ("text", "image", "file")) or etype == "postback"
+            if supported and source.get("type") == "user" and user_id and reply_token and cfg.line_channel_access_token:
+                await run_in_threadpool(line_service.start_line_loading, user_id, cfg.line_channel_access_token)
+
             if etype == "message":
                 msg = event.get("message") or {}
                 mtype = msg.get("type")

@@ -442,6 +442,26 @@ def download_line_content(message_id: str, access_token: str) -> tuple[bytes, st
     return resp.content, resp.headers.get("content-type", "")
 
 
+def start_line_loading(user_id: str, access_token: str) -> bool:
+    """Request a short-lived typing indicator without affecting message processing."""
+    if not user_id or not access_token:
+        return False
+    try:
+        response = requests.post(
+            "https://api.line.me/v2/bot/chat/loading/start",
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            json={"chatId": user_id, "loadingSeconds": 60},
+            timeout=(1, 1),
+        )
+        if response.status_code != 202:
+            print(f"[LINE] Loading indicator failed: HTTP {response.status_code}")
+            return False
+        return True
+    except requests.RequestException as exc:
+        print(f"[LINE] Loading indicator failed: {type(exc).__name__}")
+        return False
+
+
 def reply_line_messages(
     reply_token: str,
     messages: List[Dict[str, Any]],
