@@ -38,7 +38,7 @@
 | `storage_service.py` | จัดการการจัดเก็บถาวรบน Cloudflare R2 (`VaultStorageCoordinator`, `R2GatewayClient`): startup restore gate, lock, rollback, conditional ETag manifest commit และ lazy restore | เชื่อม `app.py`, `ocr_service.py`, `watcher.py`, `line_service.py`, `auth_service.py` เข้ากับ Worker `VaultR2Gateway` (`http://r2.internal`) |
 | `ocr_service.py` | ท่อประมวลผลกลาง (`VaultService`) สำหรับทุกช่องทางนำเข้า จัดการไฟล์ต้นฉบับ เรียก OCR และเชื่อมตัวสกัดข้อมูล | เชื่อม `LineOCR`, `VaultDatabase`, และ `extractor.py` |
 | `extractor.py` | สกัดข้อมูลใบเสร็จ/บิลเบิกจ่าย หมวดหมู่เอกสาร ป้ายกำกับอัตโนมัติ และข้อมูลทะเบียนเด็กอนุบาล | รองรับทั้งโหมด Offline Thai Regex (`regex`) และ Text-only LLM (`llm` ผ่าน Gemini หรือ OpenAI-compatible API) |
-| `line_service.py` | จัดการ LINE Messaging API Webhook, ตรวจ `X-Line-Signature`, ตรวจสิทธิ์ `ALLOWED_LINE_USER_IDS`/DM-only, แนบ `openExternalBrowser=1`, สร้าง Flex Card และจำลองแชท | เชื่อม `/api/line/webhook` และ `/api/line/simulate` เข้ากับ `VaultService` |
+| `line_service.py` | จัดการ LINE Messaging API Webhook, ตรวจ `X-Line-Signature`, ตรวจสิทธิ์ `ALLOWED_LINE_USER_IDS`/DM-only, แนบ `openExternalBrowser=1`, สร้าง Mascot Messaging Cards ทั้ง 7 สถานการณ์ (Bubble/Carousel + Quick Replies) และจำลองแชท | เชื่อม `/api/line/webhook` และ `/api/line/simulate` เข้ากับ `VaultService` และ `VaultStorageCoordinator` |
 | `watcher.py` | ตรวจจับไฟล์ใหม่ใน `data/inbox/` (รวมถึงโฟลเดอร์ย่อย `teacher/` และ `me/`) เพื่อนำเข้าคลังอัตโนมัติ และแยกไฟล์เสียเข้า `data/inbox_failed/` | รันเป็น Background thread ใน `app.py` หรือสั่งสแกนทันทีผ่าน `/api/watcher/scan-now` |
 
 ---
@@ -62,8 +62,9 @@
 | :--- | :--- |
 | `static/index.html` | โครงสร้างหน้าเว็บหลักของ "น้องโชคช่วย" (Login Gate, แถบผู้ใช้/ออกจากระบบ, อัปโหลดเอกสาร, ถาดรอตรวจ, สมุดเบิกจ่าย, แฟ้มเด็กอนุบาล, และ LINE Simulator) |
 | `static/styles.css` | สไตล์หน้าเว็บโทน Sunny Sky & Golden Hour รองรับทั้งหน้าจอคอมพิวเตอร์และมือถือ/LIFF |
-| `static/app.js` | ตรรกะฝั่งเบราว์เซอร์ (Vanilla JS): ตรวจ `/api/auth/me` ก่อนโหลดข้อมูล, แนบ `X-CSRF-Token`, เตือน LINE WebView, อัปโหลดไฟล์, วาดกรอบ Bounding Box, แก้ไขข้อมูล และจำลองแชท |
-| `static/mascot.jpg` | ภาพมาสคอตประจำระบบ "น้องโชคช่วย" |
+| `static/app.js` | ตรรกะฝั่งเบราว์เซอร์ (Vanilla JS): ตรวจ `/api/auth/me` ก่อนโหลดข้อมูล, แนบ `X-CSRF-Token`, เตือน LINE WebView, อัปโหลดไฟล์, วาดกรอบ Bounding Box, แก้ไขข้อมูล และเรนเดอร์ Mascot Messaging Cards + Quick Replies ใน LINE Simulator |
+| `static/mascot.jpg` | ภาพมาสคอตประจำระบบ "น้องโชคช่วย" บนหน้าเว็บหลัก |
+| `static/mascot_cards/` | ชุดภาพประกอบมาสคอต "น้องโชคช่วย" พื้นหลังใส 9 ไฟล์ (`avatar.png` และ `hero_*.png`) สำหรับการ์ดข้อความ LINE OA ทั้ง 7 สถานการณ์ |
 
 ---
 

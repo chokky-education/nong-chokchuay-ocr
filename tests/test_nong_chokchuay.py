@@ -497,6 +497,162 @@ class NongChokChuayTests(unittest.TestCase):
         self.assertEqual(res_oa["model"], "gpt-4o-mini")
         self.assertEqual(mock_oa_post.call_args.kwargs["json"]["model"], "gpt-4o-mini")
 
+    def test_line_mascot_cards_all_seven_scenarios_and_assets(self):
+        # 0. All 9 mascot card PNG assets exist and are served over HTTP
+        asset_paths = [
+            "/static/mascot_cards/avatar.png",
+            "/static/mascot_cards/hero_receipt.png",
+            "/static/mascot_cards/hero_confirmed.png",
+            "/static/mascot_cards/hero_student.png",
+            "/static/mascot_cards/hero_pending.png",
+            "/static/mascot_cards/hero_summary.png",
+            "/static/mascot_cards/hero_allergy.png",
+            "/static/mascot_cards/hero_search.png",
+            "/static/mascot_cards/hero_menu.png",
+        ]
+        for path in asset_paths:
+            resp = self.client.get(path)
+            self.assertEqual(resp.status_code, 200, f"Missing mascot asset: {path}")
+            self.assertTrue(len(resp.content) > 1000, f"Empty mascot asset: {path}")
+
+        base_url = "https://nongchok.school.example.com"
+
+        # 1. Scenario 1: Receipt Card (with portrait-safe hero aspectMode=fit + openExternalBrowser=1)
+        self.fake_ocr.default_text = (
+            "ใบเสร็จรับเงิน\nร้านสมใจเครื่องเขียน\nวันที่ 15/11/2026\n"
+            "สีเทียนเด็ก 180.00\nยอดสุทธิ 180.00 บาท"
+        )
+        r_rec = self.client.post(
+            "/api/line/simulate",
+            files={"file": ("receipt_card.png", make_png_bytes(), "image/png")},
+        )
+        self.assertEqual(r_rec.status_code, 200)
+        rec_data = r_rec.json()
+        self.assertEqual(rec_data["card_view"]["kind"], "receipt")
+        self.assertEqual(rec_data["card_view"]["mascot_image"], "/static/mascot_cards/hero_receipt.png")
+        self.assertTrue(len(rec_data["quick_replies"]) >= 2)
+        self.assertIn("quickReply", rec_data["line_messages"][-1])
+
+        rec_summary_with_url = line_service.build_nong_chok_reply_summary(
+            rec_data["ocr"],
+            expense=rec_data["ocr"].get("expense"),
+            public_base_url=base_url,
+            config=self.cfg,
+        )
+        rec_hero = rec_summary_with_url["flex_message"]["contents"]["hero"]
+        self.assertEqual(rec_hero["url"], f"{base_url}/static/mascot_cards/hero_receipt.png")
+        self.assertNotIn("openExternalBrowser", rec_hero["url"])
+        self.assertEqual(rec_hero["aspectMode"], "fit")
+        self.assertEqual(rec_hero["backgroundColor"], "#DDF5EB")
+        open_doc_actions = [a for a in rec_summary_with_url["actions"] if a["action"] == "open_doc"]
+        self.assertEqual(len(open_doc_actions), 1)
+        self.assertIn("openExternalBrowser=1", open_doc_actions[0]["url"])
+
+        # 2. Scenario 2: Student Registration Card (tel: URI must not have openExternalBrowser=1)
+        self.fake_ocr.default_text = (
+            "ใบสมัครเด็กอนุบาล\n"
+            "ชื่อ: เด็กหญิงใบบัว รักเรียน (ชื่อเล่น: น้องใบบัว)\n"
+            "ชั้นเรียน: อนุบาล 1/2\n"
+            "เบอร์ผู้ปกครอง: 089-777-8888\n"
+            "แพ้อาหาร: แพ้ถั่วลิสง\n"
+        )
+        r_stu = self.client.post(
+            "/api/line/simulate",
+            files={"file": ("student_card.png", make_png_bytes(), "image/png")},
+        )
+        self.assertEqual(r_stu.status_code, 200)
+        stu_data = r_stu.json()
+        self.assertEqual(stu_data["card_view"]["kind"], "student")
+        self.assertTrue(stu_data["card_view"]["has_allergy"])
+        self.assertEqual(stu_data["card_view"]["mascot_image"], "/static/mascot_cards/hero_student.png")
+        call_actions = [a for a in stu_data["actions"] if a["action"] == "call_parent"]
+        self.assertEqual(len(call_actions), 1)
+        self.assertEqual(call_actions[0]["url"], "tel:0897778888")
+        self.assertNotIn("openExternalBrowser", call_actions[0]["url"])
+
+        # 3. Scenario 3: Pending Review Carousel ("รอตรวจ")
+        r_pend = line_service.process_line_text_command(
+            "รอตรวจ",
+            db_path=self.cfg.db_path,
+            public_base_url=base_url,
+            config=self.cfg,
+        )
+        self.assertEqual(r_pend["intent"], "pending_review_list")
+        self.assertEqual(r_pend["card_view"]["kind"], "pending_carousel")
+        self.assertGreaterEqual(len(r_pend["card_view"]["items"]), 2)
+        self.assertEqual(r_pend["flex_message"]["contents"]["type"], "carousel")
+        self.assertEqual(
+            r_pend["flex_message"]["contents"]["contents"][0]["hero"]["url"],
+            f"{base_url}/static/mascot_cards/hero_pending.png",
+        )
+        self.assertEqual(r_pend["flex_message"]["contents"]["contents"][0]["hero"]["aspectMode"], "fit")
+
+        # 4. Scenario 4: Expense Summary ("ยอดรอเบิก")
+        r_sum = line_service.process_line_text_command(
+            "ยอดรอเบิก",
+            db_path=self.cfg.db_path,
+            public_base_url=base_url,
+            config=self.cfg,
+        )
+        self.assertEqual(r_sum["intent"], "reimbursement_summary")
+        self.assertEqual(r_sum["card_view"]["kind"], "expense_summary")
+        self.assertEqual(r_sum["card_view"]["mascot_image"], "/static/mascot_cards/hero_summary.png")
+        self.assertAlmostEqual(r_sum["card_view"]["pending_total"], 180.0, places=2)
+        open_web_actions = [a for a in r_sum["actions"] if a["action"] == "open_web"]
+        self.assertEqual(len(open_web_actions), 1)
+        self.assertIn("openExternalBrowser=1", open_web_actions[0]["url"])
+
+        # 5. Scenario 5: Allergy Watchlist ("แพ้อาหาร")
+        r_alg = line_service.process_line_text_command(
+            "แพ้อาหาร",
+            db_path=self.cfg.db_path,
+            public_base_url=base_url,
+            config=self.cfg,
+        )
+        self.assertEqual(r_alg["intent"], "student_allergy_summary")
+        self.assertEqual(r_alg["card_view"]["kind"], "allergy_watchlist")
+        self.assertEqual(r_alg["card_view"]["mascot_image"], "/static/mascot_cards/hero_allergy.png")
+        self.assertGreaterEqual(r_alg["card_view"]["allergy_count"], 1)
+
+        # 6. Scenario 6: Search Carousel ("ค้นหา สีเทียน")
+        r_srch = line_service.process_line_text_command(
+            "ค้นหา สีเทียน",
+            db_path=self.cfg.db_path,
+            public_base_url=base_url,
+            config=self.cfg,
+        )
+        self.assertEqual(r_srch["intent"], "search")
+        self.assertEqual(r_srch["card_view"]["kind"], "search_carousel")
+        self.assertEqual(r_srch["card_view"]["mascot_image"], "/static/mascot_cards/hero_search.png")
+        self.assertGreaterEqual(len(r_srch["card_view"]["items"]), 1)
+        srch_bubble = r_srch["flex_message"]["contents"]
+        if srch_bubble.get("type") == "carousel":
+            srch_bubble = srch_bubble["contents"][0]
+        self.assertIn("openExternalBrowser=1", srch_bubble["footer"]["contents"][0]["action"]["uri"])
+
+        # 7. Scenario 7: Shortcut Menu ("เมนู") & Confirmed Postback Card + run_cmd Postback
+        r_menu = self.client.post("/api/line/simulate", data={"text": "เมนู"}).json()
+        self.assertEqual(r_menu["intent"], "help")
+        self.assertEqual(r_menu["card_view"]["kind"], "menu")
+        self.assertEqual(r_menu["card_view"]["mascot_image"], "/static/mascot_cards/hero_menu.png")
+        self.assertEqual(len(r_menu["card_view"]["shortcuts"]), 3)
+
+        doc_id = rec_data["ocr"]["doc_id"]
+        r_conf = self.client.post(
+            "/api/line/simulate",
+            data={"postback_data": f"action=confirm_review&doc_id={doc_id}"},
+        ).json()
+        self.assertTrue(r_conf["success"])
+        self.assertEqual(r_conf["doc_id"], doc_id)
+        self.assertEqual(r_conf["card_view"]["mascot_image"], "/static/mascot_cards/hero_confirmed.png")
+
+        r_runcmd = self.client.post(
+            "/api/line/simulate",
+            data={"postback_data": "action=run_cmd&cmd=ยอดรอเบิก"},
+        ).json()
+        self.assertTrue(r_runcmd["success"])
+        self.assertEqual(r_runcmd["card_view"]["kind"], "expense_summary")
+
 
 if __name__ == "__main__":
     unittest.main()

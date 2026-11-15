@@ -10,19 +10,34 @@ const APP_JS_SOURCE = fs.readFileSync(APP_JS_PATH, 'utf8');
 function createMockElement(id = '') {
   const listeners = new Map();
   const classes = new Set();
-  return {
+  let htmlValue = '';
+  const el = {
     id,
     hidden: false,
     disabled: false,
     checked: false,
     value: '',
     textContent: '',
-    innerHTML: '',
+    get innerHTML() {
+      return htmlValue;
+    },
+    set innerHTML(val) {
+      htmlValue = String(val ?? '');
+      if (htmlValue === '') {
+        el.children.length = 0;
+      }
+    },
     href: '',
     src: '',
+    alt: '',
+    loading: '',
+    title: '',
+    type: '',
+    className: '',
     dataset: {},
     style: {},
     files: [],
+    children: [],
     classList: {
       add: (...items) => items.forEach((c) => classes.add(c)),
       remove: (...items) => items.forEach((c) => classes.delete(c)),
@@ -54,10 +69,19 @@ function createMockElement(id = '') {
     click() {
       return this.trigger('click');
     },
-    appendChild() {},
+    appendChild(child) {
+      if (child) this.children.push(child);
+      return child;
+    },
+    append(...nodes) {
+      nodes.forEach((node) => {
+        if (node) this.children.push(node);
+      });
+    },
     querySelectorAll: () => [],
     querySelector: () => null,
   };
+  return el;
 }
 
 function jsonResponse(status, body) {
@@ -517,4 +541,77 @@ test('upload preserves Idempotency-Key across transient 503 retry and rotates af
   assert.ok(ocrHeaders[0]['Idempotency-Key']);
   assert.equal(ocrHeaders[1]['Idempotency-Key'], ocrHeaders[0]['Idempotency-Key']);
   assert.notEqual(ocrHeaders[2]['Idempotency-Key'], ocrHeaders[1]['Idempotency-Key']);
+});
+
+test('LINE simulator renders Mascot Card + Quick Replies safely via DOM and clears them on logout', async () => {
+  const { getEl, body } = runFrontendApp({
+    fetchImpl: async (url) => {
+      if (url === '/api/auth/me') {
+        return jsonResponse(200, {
+          authenticated: true,
+          auth_required: true,
+          oauth_configured: true,
+          csrf_token: 'csrf-sim-1',
+          user: { email: 'teacher@school.th', name: 'Teacher', picture: '' },
+        });
+      }
+      if (url === '/api/system') return jsonResponse(200, { database: {} });
+      if (url === '/api/watcher/status') return jsonResponse(200, { inbox_pending_count: 0 });
+      if (url === '/api/line/simulate') {
+        return jsonResponse(200, {
+          mode: 'text',
+          intent: 'reimbursement_summary',
+          reply_text: 'สรุปยอดเงิน',
+          actions: [
+            { label: '📄 ดูรายการรอตรวจ', action: 'run_cmd', cmd: 'รอตรวจ', data: 'action=run_cmd&cmd=รอตรวจ' },
+          ],
+          card_view: {
+            kind: 'expense_summary',
+            theme: 'summary',
+            step_num: '4',
+            badge_title: 'ยอดรอเบิก / สรุปงบ',
+            mascot_image: '/static/mascot_cards/hero_summary.png',
+            pending_total: 420,
+            pending_count: 2,
+            reimbursed_total: 180,
+            reimbursed_count: 1,
+            reimbursed_pct: 30,
+          },
+          quick_replies: [
+            { label: '📥 ดูรายการค้างตรวจ', text: 'รอตรวจ' },
+            { label: '⚠️ เด็กแพ้อาหาร', text: 'แพ้อาหาร' },
+          ],
+        });
+      }
+      if (url === '/api/auth/logout') return jsonResponse(200, { success: true });
+      throw new Error(`Unexpected fetch to ${url}`);
+    },
+  });
+
+  await flushMicrotasks();
+
+  // Opening LINE simulator populates default quick reply chips
+  await getEl('btn-open-line-sim').click();
+  assert.equal(getEl('line-quick-replies').children.length, 4);
+
+  // Sending "ยอดรอเบิก" appends user bubble + Mascot card bot message + updated quick replies
+  getEl('line-sim-text-input').value = 'ยอดรอเบิก';
+  await getEl('btn-line-sim-send').click();
+  await flushMicrotasks();
+
+  const chatRows = getEl('line-chat-messages').children;
+  assert.equal(chatRows.length, 2);
+  const botRow = chatRows[1];
+  assert.equal(botRow.children[0].src, '/static/mascot_cards/avatar.png');
+  const mascotCard = botRow.children[1].children[0];
+  assert.equal(mascotCard.className, 'line-mascot-card theme-summary');
+  assert.equal(getEl('line-quick-replies').children.length, 2);
+  assert.equal(getEl('line-quick-replies').children[0].textContent, '📥 ดูรายการค้างตรวจ');
+
+  // Logout clears both chat messages and quick replies
+  await getEl('btn-logout').click();
+  await flushMicrotasks();
+  assert.equal(body.dataset.authState, 'unauthenticated');
+  assert.equal(getEl('line-chat-messages').children.length, 0);
+  assert.equal(getEl('line-quick-replies').children.length, 0);
 });

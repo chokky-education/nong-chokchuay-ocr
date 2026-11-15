@@ -1086,6 +1086,7 @@ def create_app(
                         db_path=cfg.db_path,
                         config=cfg,
                         teacher_name=cfg.teacher_name,
+                        public_base_url=cfg.public_base_url,
                         storage=storage,
                         operation_id=pb_op_id,
                     )
@@ -1150,6 +1151,7 @@ def create_app(
                 db_path=cfg.db_path,
                 config=cfg,
                 teacher_name=cfg.teacher_name,
+                public_base_url=cfg.public_base_url,
                 storage=storage,
                 operation_id=op_id,
             )
