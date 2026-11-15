@@ -186,9 +186,21 @@ def create_app(
             or norm_path == "/api/health"
             or norm_path.startswith("/static/")
         )
+        is_public_path = (
+            norm_path in _PUBLIC_PATHS
+            or norm_path in _PUBLIC_STATIC_PATHS
+            or norm_path.startswith("/static/mascot_cards/")
+        )
+        session = None
         if not is_storage_exempt:
             try:
-                await run_in_threadpool(storage.require_ready)
+                if cfg.auth_required and not is_public_path:
+                    session = await run_in_threadpool(
+                        storage.execute_read,
+                        lambda: auth_service.authenticate_request(request, cfg),
+                    )
+                else:
+                    await run_in_threadpool(storage.require_ready)
             except storage_service.StorageError as exc:
                 return JSONResponse(
                     status_code=exc.status_code,
@@ -200,17 +212,11 @@ def create_app(
                     },
                 )
 
-        if not cfg.auth_required:
+        if not cfg.auth_required or is_public_path:
             return await call_next(request)
 
-        if (
-            norm_path in _PUBLIC_PATHS
-            or norm_path in _PUBLIC_STATIC_PATHS
-            or norm_path.startswith("/static/mascot_cards/")
-        ):
-            return await call_next(request)
-
-        session = auth_service.authenticate_request(request, cfg)
+        if session is None and is_storage_exempt:
+            session = await run_in_threadpool(auth_service.authenticate_request, request, cfg)
         if not session:
             return JSONResponse(status_code=401, content={"detail": "Authentication required"})
 
@@ -248,8 +254,9 @@ def create_app(
 
     @application.get("/api/auth/me")
     def get_auth_me(request: Request):
-        storage.require_ready()
-        session = auth_service.authenticate_request(request, cfg) if cfg.auth_required else None
+        session = storage.execute_read(
+            lambda: auth_service.authenticate_request(request, cfg) if cfg.auth_required else None
+        )
         return {
             "authenticated": bool(session) if cfg.auth_required else True,
             "auth_required": cfg.auth_required,

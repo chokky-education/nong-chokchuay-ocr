@@ -1073,6 +1073,238 @@ class R2PersistenceTests(unittest.TestCase):
                 self.assertEqual(len(docs), 1)
                 self.assertEqual(docs[0]["id"], doc_id_2)
 
+    def test_18_s1r_concurrent_session_read_waits_for_in_flight_aborted_logout_without_false_401(self):
+        import time
+        import auth_service
+
+        r2 = InMemoryR2Gateway()
+        with tempfile.TemporaryDirectory() as d:
+            cfg = _r2_config(d)
+            cfg.auth_required = True
+            cfg.auth_session_secret = "test-secret-for-s1r"
+            cfg.allowed_emails = ("teacher@school.ac.th",)
+            cfg.public_base_url = "http://127.0.0.1:8765"
+            test_app = create_app(config=cfg, engine_factory=lambda: FakeLineOCR(), storage_client=r2)
+            with TestClient(test_app) as client:
+                sid = "sess-s1r-concurrent"
+                exp_ts = int(time.time()) + 3600
+                test_app.state.storage.execute_mutation(
+                    f"test:login:{sid}",
+                    "create_auth_session",
+                    lambda _rev: database.create_auth_session(
+                        session_id=sid,
+                        email="teacher@school.ac.th",
+                        name="Teacher",
+                        picture="",
+                        csrf_token="csrf-s1r",
+                        expires_at="2099-01-01T00:00:00Z",
+                        db_path=cfg.db_path,
+                    ),
+                )
+                cookie_val = auth_service.sign_payload(
+                    {"sid": sid, "email": "teacher@school.ac.th", "exp": exp_ts},
+                    cfg.auth_session_secret,
+                )
+
+                logout_in_manifest_put = threading.Event()
+                allow_logout_abort = threading.Event()
+                orig_put_manifest = r2.put_manifest
+                logout_intercepted = {"done": False}
+
+                def _stalling_failed_put_manifest(manifest, *, if_match=None, if_none_match_star=False):
+                    if not logout_intercepted["done"]:
+                        logout_intercepted["done"] = True
+                        logout_in_manifest_put.set()
+                        allow_logout_abort.wait(timeout=5.0)
+                        raise storage_service.StorageCommitError(
+                            "Simulated transient R2 manifest failure",
+                            error_code="manifest_network_err",
+                        )
+                    return orig_put_manifest(
+                        manifest,
+                        if_match=if_match,
+                        if_none_match_star=if_none_match_star,
+                    )
+
+                r2.put_manifest = _stalling_failed_put_manifest
+                results: dict[str, object] = {}
+                docs_done = threading.Event()
+                me_done = threading.Event()
+                errors: list[Exception] = []
+
+                def _run_logout():
+                    try:
+                        results["logout"] = client.post(
+                            "/api/auth/logout",
+                            headers={
+                                "cookie": f"{auth_service.SESSION_COOKIE_NAME}={cookie_val}",
+                                "origin": "http://127.0.0.1:8765",
+                                "x-csrf-token": "csrf-s1r",
+                            },
+                        )
+                    except Exception as exc:
+                        errors.append(exc)
+
+                def _run_docs():
+                    try:
+                        results["docs"] = client.get(
+                            "/api/documents",
+                            headers={"cookie": f"{auth_service.SESSION_COOKIE_NAME}={cookie_val}"},
+                        )
+                    except Exception as exc:
+                        errors.append(exc)
+                    finally:
+                        docs_done.set()
+
+                def _run_me():
+                    try:
+                        results["me"] = client.get(
+                            "/api/auth/me",
+                            headers={"cookie": f"{auth_service.SESSION_COOKIE_NAME}={cookie_val}"},
+                        )
+                    except Exception as exc:
+                        errors.append(exc)
+                    finally:
+                        me_done.set()
+
+                t_logout = threading.Thread(target=_run_logout)
+                t_logout.start()
+                self.assertTrue(logout_in_manifest_put.wait(timeout=5.0))
+
+                t_docs = threading.Thread(target=_run_docs)
+                t_me = threading.Thread(target=_run_me)
+                t_docs.start()
+                t_me.start()
+
+                # Both readers must block under _mutation_lock until logout finishes and rolls back SQLite.
+                time.sleep(0.15)
+                self.assertFalse(docs_done.is_set())
+                self.assertFalse(me_done.is_set())
+
+                r2.put_manifest = orig_put_manifest
+                allow_logout_abort.set()
+                t_logout.join(timeout=5.0)
+                t_docs.join(timeout=5.0)
+                t_me.join(timeout=5.0)
+
+                self.assertEqual(errors, [])
+                self.assertEqual(results["logout"].status_code, 503)
+                self.assertEqual(results["docs"].status_code, 200)
+                self.assertEqual(results["me"].status_code, 200)
+                self.assertTrue(results["me"].json()["authenticated"])
+
+    def test_19_f3r_watcher_defers_when_opid_sidecar_write_or_read_fails_and_never_duplicates(self):
+        import builtins
+        from unittest import mock
+        import ocr_service
+
+        r2 = InMemoryR2Gateway()
+        with tempfile.TemporaryDirectory() as d:
+            cfg = _r2_config(d)
+            png_bytes = _make_png_bytes((22, 44, 66))
+            test_app = create_app(config=cfg, engine_factory=lambda: FakeLineOCR(), storage_client=r2)
+            with TestClient(test_app) as client:
+                inbox_file = os.path.join(cfg.inbox_dir, "receipt_f3r.png")
+                with open(inbox_file, "wb") as fh:
+                    fh.write(png_bytes)
+
+                with mock.patch("watcher.os.replace", side_effect=OSError("disk full")), \
+                     mock.patch("watcher.ocr_service.ingest_document", wraps=ocr_service.ingest_document) as ingest_spy:
+                    scan_write_err = test_app.state.watcher.scan_once(require_stability=False)
+
+                self.assertEqual(scan_write_err["processed"], 0)
+                self.assertEqual(scan_write_err["failed"], 0)
+                self.assertEqual(scan_write_err["skipped"], 1)
+                self.assertEqual(ingest_spy.call_count, 0)
+                self.assertTrue(os.path.exists(inbox_file))
+                self.assertEqual(client.get("/api/documents").json()["total"], 0)
+
+                # Once sidecar persists cleanly, simulate ambiguous R2 response (committed in R2, error returned).
+                orig_put_manifest = r2.put_manifest
+                orig_get_manifest = r2.get_manifest
+                ambiguous_calls = {"put": 0, "get": 0}
+
+                def _commit_then_drop_ack(manifest, *, if_match=None, if_none_match_star=False):
+                    res = orig_put_manifest(
+                        manifest,
+                        if_match=if_match,
+                        if_none_match_star=if_none_match_star,
+                    )
+                    if ambiguous_calls["put"] == 0:
+                        ambiguous_calls["put"] += 1
+                        raise storage_service.StorageCommitError(
+                            "Response lost after R2 commit",
+                            error_code="manifest_ack_lost",
+                            ambiguous=True,
+                        )
+                    return res
+
+                def _fail_reconcile_get_once():
+                    if ambiguous_calls["put"] == 1 and ambiguous_calls["get"] == 0:
+                        ambiguous_calls["get"] += 1
+                        raise storage_service.StorageUnavailableError(
+                            "Transient R2 outage during reconcile",
+                            error_code="r2_temp_down",
+                        )
+                    return orig_get_manifest()
+
+                r2.put_manifest = _commit_then_drop_ack
+                r2.get_manifest = _fail_reconcile_get_once
+                scan_ambiguous = test_app.state.watcher.scan_once(require_stability=False)
+                r2.put_manifest = orig_put_manifest
+                r2.get_manifest = orig_get_manifest
+                self.assertEqual(scan_ambiguous["processed"], 0)
+                self.assertEqual(scan_ambiguous["skipped"], 1)
+                self.assertTrue(os.path.exists(inbox_file))
+                self.assertTrue(os.path.exists(f"{inbox_file}.opid"))
+
+                # Reading existing .opid fails -> watcher must defer before ingesting instead of making a new ID.
+                orig_open = builtins.open
+
+                def _fail_opid_read(file, mode="r", *args, **kwargs):
+                    if isinstance(file, str) and file.endswith(".opid") and "r" in mode:
+                        raise PermissionError("opid unreadable")
+                    return orig_open(file, mode, *args, **kwargs)
+
+                with mock.patch("builtins.open", side_effect=_fail_opid_read), \
+                     mock.patch("watcher.ocr_service.ingest_document", wraps=ocr_service.ingest_document) as ingest_spy_2:
+                    scan_read_err = test_app.state.watcher.scan_once(require_stability=False)
+
+                self.assertEqual(scan_read_err["processed"], 0)
+                self.assertEqual(scan_read_err["failed"], 0)
+                self.assertEqual(scan_read_err["skipped"], 1)
+                self.assertEqual(ingest_spy_2.call_count, 0)
+                self.assertTrue(os.path.exists(inbox_file))
+
+                # Retry after I/O recovers -> reconciles + reuses existing .opid -> exactly 1 document!
+                scan_recover = test_app.state.watcher.scan_once(require_stability=False)
+                self.assertEqual(scan_recover["processed"], 1)
+                self.assertEqual(len(scan_recover["doc_ids"]), 1)
+                self.assertFalse(os.path.exists(inbox_file))
+                self.assertFalse(os.path.exists(f"{inbox_file}.opid"))
+                self.assertEqual(client.get("/api/documents").json()["total"], 1)
+
+                # Corrupted .opid sidecar on disk must also defer before ingestion without quarantining.
+                corrupt_file = os.path.join(cfg.inbox_dir, "corrupt_f3r.png")
+                with open(corrupt_file, "wb") as fh:
+                    fh.write(_make_png_bytes((99, 88, 77)))
+                with open(f"{corrupt_file}.opid", "w", encoding="utf-8") as fh:
+                    fh.write("corrupt-partial-content\n")
+
+                with mock.patch("watcher.ocr_service.ingest_document", wraps=ocr_service.ingest_document) as ingest_spy_3:
+                    scan_corrupt = test_app.state.watcher.scan_once(require_stability=False)
+
+                self.assertEqual(scan_corrupt["processed"], 0)
+                self.assertEqual(scan_corrupt["failed"], 0)
+                self.assertEqual(scan_corrupt["skipped"], 1)
+                self.assertEqual(ingest_spy_3.call_count, 0)
+                self.assertTrue(os.path.exists(corrupt_file))
+
+                os.remove(f"{corrupt_file}.opid")
+                scan_corrupt_recovered = test_app.state.watcher.scan_once(require_stability=False)
+                self.assertEqual(scan_corrupt_recovered["processed"], 1)
+                self.assertEqual(client.get("/api/documents").json()["total"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

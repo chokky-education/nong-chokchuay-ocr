@@ -1,5 +1,6 @@
 import hashlib
 import os
+import re
 import shutil
 import threading
 import time
@@ -46,6 +47,7 @@ class InboxWatcher:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._pending_sizes: Dict[str, int] = {}
+        self._active_op_ids: Dict[str, Tuple[int, str, str]] = {}
         self.last_scan_at: str = ""
         self.last_result: Dict[str, Any] = {"processed": 0, "failed": 0, "skipped": 0}
 
@@ -64,6 +66,7 @@ class InboxWatcher:
         return f"{full_path}.opid"
 
     def _remove_opid_sidecar(self, full_path: str) -> None:
+        self._active_op_ids.pop(full_path, None)
         sidecar = self._opid_sidecar_path(full_path)
         if os.path.exists(sidecar):
             try:
@@ -80,29 +83,71 @@ class InboxWatcher:
     ) -> str:
         sidecar = self._opid_sidecar_path(full_path)
         prefix = f"{file_size}:{file_sha256}:"
-        if os.path.isfile(sidecar):
+        if os.path.lexists(sidecar):
+            if not os.path.isfile(sidecar):
+                raise storage_service.StorageUnavailableError(
+                    f"Operation ID sidecar is not a regular file: '{sidecar}'",
+                    error_code="watcher_opid_io_error",
+                )
             try:
                 with open(sidecar, "r", encoding="utf-8") as fh:
                     raw = fh.read().strip()
-                if raw.startswith(prefix):
-                    existing = raw[len(prefix):].strip()
-                    if existing:
-                        return existing
-            except OSError:
-                pass
+            except OSError as exc:
+                raise storage_service.StorageUnavailableError(
+                    f"Failed to read operation ID sidecar '{sidecar}': {exc}",
+                    error_code="watcher_opid_io_error",
+                ) from exc
 
-        op_id = f"watcher:{rel_path}:{file_size}:{file_sha256}:{uuid.uuid4().hex[:12]}"
+            if raw.startswith(prefix):
+                existing = raw[len(prefix):].strip()
+                if existing and not any(ch.isspace() for ch in existing):
+                    self._active_op_ids[full_path] = (file_size, file_sha256, existing)
+                    return existing
+                raise storage_service.StorageUnavailableError(
+                    f"Corrupted operation ID sidecar '{sidecar}'",
+                    error_code="watcher_opid_corrupted",
+                )
+
+            if not re.fullmatch(r"\d+:[0-9a-f]{64}:\S+", raw):
+                raise storage_service.StorageUnavailableError(
+                    f"Corrupted operation ID sidecar '{sidecar}'",
+                    error_code="watcher_opid_corrupted",
+                )
+
+        cached = self._active_op_ids.get(full_path)
+        if cached and cached[0] == file_size and cached[1] == file_sha256:
+            op_id = cached[2]
+        else:
+            op_id = f"watcher:{rel_path}:{file_size}:{file_sha256}:{uuid.uuid4().hex[:12]}"
+            self._active_op_ids[full_path] = (file_size, file_sha256, op_id)
+
+        expected_payload = f"{prefix}{op_id}"
         tmp_sidecar = f"{sidecar}.{uuid.uuid4().hex[:8]}.tmp"
         try:
             with open(tmp_sidecar, "w", encoding="utf-8") as fh:
-                fh.write(f"{prefix}{op_id}\n")
+                fh.write(f"{expected_payload}\n")
+                fh.flush()
+                if hasattr(fh, "fileno"):
+                    os.fsync(fh.fileno())
             os.replace(tmp_sidecar, sidecar)
-        except OSError:
+            with open(sidecar, "r", encoding="utf-8") as fh:
+                persisted = fh.read().strip()
+        except OSError as exc:
             if os.path.exists(tmp_sidecar):
                 try:
                     os.remove(tmp_sidecar)
                 except OSError:
                     pass
+            raise storage_service.StorageUnavailableError(
+                f"Failed to persist operation ID sidecar '{sidecar}': {exc}",
+                error_code="watcher_opid_io_error",
+            ) from exc
+
+        if persisted != expected_payload:
+            raise storage_service.StorageUnavailableError(
+                f"Operation ID sidecar verification mismatch for '{sidecar}'",
+                error_code="watcher_opid_corrupted",
+            )
         return op_id
 
     def _cleanup_orphan_opids(self) -> None:
@@ -237,6 +282,9 @@ class InboxWatcher:
                 for tracked in list(self._pending_sizes.keys()):
                     if tracked not in active_paths:
                         self._pending_sizes.pop(tracked, None)
+                for tracked in list(self._active_op_ids.keys()):
+                    if tracked not in active_paths:
+                        self._active_op_ids.pop(tracked, None)
 
                 self.last_scan_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 summary = {

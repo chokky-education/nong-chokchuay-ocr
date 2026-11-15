@@ -9,7 +9,9 @@ import urllib.request
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
+from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, TypeVar
+
+T = TypeVar("T")
 
 import database
 from config import AppConfig
@@ -801,6 +803,12 @@ class VaultStorageCoordinator:
                     )
                 if self._dirty_uncommitted:
                     self._reconcile_dirty_state()
+
+    def execute_read(self, read_fn: Callable[[], T]) -> T:
+        """Run readiness/reconciliation and a read callback atomically under the mutation lock."""
+        with self._mutation_lock:
+            self.require_ready()
+            return read_fn()
 
     @staticmethod
     def _assert_idempotency_payload_match(existing_op: Dict[str, Any], expected_payload_hash: str) -> None:
