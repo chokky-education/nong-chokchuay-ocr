@@ -462,3 +462,59 @@ test('logout returning 401 switches to auth-gate and preserves session-expired n
   assert.equal(getEl('auth-error-banner').hidden, false);
   assert.match(getEl('auth-error-banner').textContent, /เซสชันหมดอายุ/);
 });
+
+test('upload preserves Idempotency-Key across transient 503 retry and rotates after success', async () => {
+  const ocrHeaders = [];
+  let ocrAttempt = 0;
+  const { getEl } = runFrontendApp({
+    fetchImpl: async (url, options = {}) => {
+      if (url === '/api/auth/me') {
+        return jsonResponse(200, {
+          authenticated: true,
+          auth_required: true,
+          oauth_configured: true,
+          csrf_token: 'csrf-upload-1',
+          user: { email: 'teacher@school.th', name: 'Teacher', picture: '' },
+        });
+      }
+      if (url === '/api/system') return jsonResponse(200, { database: {} });
+      if (url === '/api/watcher/status') return jsonResponse(200, { inbox_pending_count: 0 });
+      if (url === '/api/ocr') {
+        ocrAttempt += 1;
+        ocrHeaders.push(options.headers || {});
+        if (ocrAttempt === 1) {
+          return jsonResponse(503, { detail: 'temporary commit timeout' });
+        }
+        return jsonResponse(200, {
+          success: true,
+          doc_id: `doc-up-${ocrAttempt}`,
+          filename: 'receipt.png',
+          text: 'รวมทั้งสิ้น 250.00 บาท',
+          lines: [],
+        });
+      }
+      throw new Error(`Unexpected fetch to ${url}`);
+    },
+  });
+
+  await flushMicrotasks();
+  const sampleFile = { name: 'receipt.png', size: 1234, lastModified: 1700000000000 };
+  const fileInput = getEl('file-input');
+
+  // Attempt 1 fails 503
+  await fileInput.trigger('change', { target: { files: [sampleFile] } });
+  await flushMicrotasks();
+
+  // Retry same file -> must reuse exact same Idempotency-Key
+  await fileInput.trigger('change', { target: { files: [sampleFile] } });
+  await flushMicrotasks();
+
+  // New upload of same file after previous 200 success -> must mint a new Idempotency-Key
+  await fileInput.trigger('change', { target: { files: [sampleFile] } });
+  await flushMicrotasks();
+
+  assert.equal(ocrHeaders.length, 3);
+  assert.ok(ocrHeaders[0]['Idempotency-Key']);
+  assert.equal(ocrHeaders[1]['Idempotency-Key'], ocrHeaders[0]['Idempotency-Key']);
+  assert.notEqual(ocrHeaders[2]['Idempotency-Key'], ocrHeaders[1]['Idempotency-Key']);
+});

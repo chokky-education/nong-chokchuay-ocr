@@ -861,6 +861,218 @@ class R2PersistenceTests(unittest.TestCase):
             finally:
                 srv.shutdown()
 
+    def test_13_s1_reconcile_dirty_state_before_reading_auth_sessions(self):
+        r2 = InMemoryR2Gateway()
+        with tempfile.TemporaryDirectory() as d:
+            cfg = _r2_config(d, auth_required=True, allowed_emails=("teacher@school.th",))
+            test_app = create_app(config=cfg, engine_factory=lambda: FakeLineOCR(), storage_client=r2)
+            with TestClient(test_app, base_url="https://vault.example.com") as client:
+                with (
+                    mock.patch.object(auth_service, "exchange_google_code", return_value={"access_token": "tok"}),
+                    mock.patch.object(
+                        auth_service,
+                        "fetch_google_userinfo",
+                        return_value={"email": "teacher@school.th", "email_verified": True, "name": "ครูพิ้งกี้"},
+                    ),
+                ):
+                    client.get("/api/auth/google/login", follow_redirects=False)
+                    state = auth_service.verify_signed_payload(
+                        client.cookies.get(auth_service.OAUTH_STATE_COOKIE_NAME), cfg.auth_session_secret
+                    )["state"]
+                    client.get("/api/auth/google/callback", params={"code": "c1", "state": state}, follow_redirects=False)
+
+                csrf = client.cookies.get(auth_service.CSRF_COOKIE_NAME)
+                headers = {"X-CSRF-Token": csrf, "Origin": "https://vault.example.com"}
+
+                # Ambiguous logout failure + unreachable get_manifest leaves storage READY with dirty uncommitted revocation
+                r2.put_manifest_override = storage_service.StorageCommitError(
+                    "timeout during logout", error_code="manifest_timeout", ambiguous=True
+                )
+                r2.get_manifest_override = storage_service.StorageUnavailableError("r2 down during reconcile")
+                logout1 = client.post("/api/auth/logout", headers=headers)
+                self.assertEqual(logout1.status_code, 503)
+                self.assertEqual(test_app.state.storage.state, "READY")
+                self.assertTrue(test_app.state.storage._dirty_uncommitted)
+
+                # While R2 is still unreachable, auth endpoints must return 503 (never 401 or authenticated=false)
+                me_down = client.get("/api/auth/me")
+                self.assertEqual(me_down.status_code, 503)
+                docs_down = client.get("/api/documents")
+                self.assertEqual(docs_down.status_code, 503)
+
+                # Once R2 recovers (manifest still at login revision with active session), /api/auth/me reconciles first!
+                r2.put_manifest_override = None
+                r2.get_manifest_override = None
+                me_ok = client.get("/api/auth/me")
+                self.assertEqual(me_ok.status_code, 200)
+                self.assertTrue(me_ok.json()["authenticated"])
+                self.assertFalse(test_app.state.storage._dirty_uncommitted)
+
+                # Retrying logout succeeds 200 (never 401)
+                logout2 = client.post("/api/auth/logout", headers=headers)
+                self.assertEqual(logout2.status_code, 200)
+                self.assertTrue(logout2.json()["success"])
+                me_after = client.get("/api/auth/me")
+                self.assertEqual(me_after.status_code, 200)
+                self.assertFalse(me_after.json()["authenticated"])
+
+    def test_14_s2_bootstrap_refuses_to_overwrite_non_empty_local_sqlite(self):
+        r2 = InMemoryR2Gateway()
+        with tempfile.TemporaryDirectory() as d:
+            cfg = _r2_config(d, bootstrap=True)
+            database.init_db(cfg.db_path)
+            seeded = database.upsert_student(
+                full_name="เด็กหญิงต้นข้าว ใจดี",
+                nickname="ต้นข้าว",
+                allergies="แพ้กุ้ง",
+                db_path=cfg.db_path,
+            )
+            storage = storage_service.VaultStorageCoordinator(cfg, client=r2)
+            storage.startup()
+
+            self.assertEqual(storage.state, "ERROR")
+            self.assertEqual(storage.error_code, "bootstrap_refused_non_empty_local_db")
+            self.assertIsNone(r2.manifest_bytes)
+            students_after = database.list_students(db_path=cfg.db_path)["students"]
+            self.assertEqual(len(students_after), 1)
+            self.assertEqual(students_after[0]["id"], seeded["id"])
+
+    def test_15_f1_never_rollback_local_db_after_put_manifest_commits(self):
+        r2 = InMemoryR2Gateway()
+        with tempfile.TemporaryDirectory() as d:
+            cfg = _r2_config(d, bootstrap=True)
+            test_app = create_app(config=cfg, engine_factory=lambda: FakeLineOCR(), storage_client=r2)
+            with TestClient(test_app) as client:
+                storage = test_app.state.storage
+                real_atomic_copy = storage_service._atomic_copy_file
+
+                def _fail_committed_copy_once(src_path, dst_path):
+                    if dst_path == storage.committed_db_path:
+                        raise OSError("simulated disk error copying committed snapshot")
+                    return real_atomic_copy(src_path, dst_path)
+
+                with mock.patch.object(storage_service, "_atomic_copy_file", side_effect=_fail_committed_copy_once):
+                    stu1 = client.post(
+                        "/api/students",
+                        json={"full_name": "เด็กชายสอง ปลอดภัย", "nickname": "สอง"},
+                    )
+                self.assertEqual(stu1.status_code, 503)
+                self.assertEqual(stu1.json()["error"], "post_commit_sync_failed")
+                self.assertEqual(storage.state, "READY")
+                self.assertTrue(storage._dirty_uncommitted)
+
+                # Next write reconciles cleanly to rev 2 and commits rev 3 without manifest_etag_conflict or ERROR state
+                stu2 = client.post(
+                    "/api/students",
+                    json={"full_name": "เด็กหญิงสาม ครบถ้วน", "nickname": "สาม"},
+                )
+                self.assertEqual(stu2.status_code, 200, stu2.text)
+                self.assertEqual(storage.state, "READY")
+                self.assertEqual(storage.current_revision, 3)
+
+                all_students = client.get("/api/students").json()["students"]
+                names = {s["full_name"] for s in all_students}
+                self.assertEqual(names, {"เด็กชายสอง ปลอดภัย", "เด็กหญิงสาม ครบถ้วน"})
+
+    def test_16_f2_web_ocr_idempotency_key_retry_and_payload_mismatch_409(self):
+        r2 = InMemoryR2Gateway()
+        png_a = _make_png_bytes((20, 40, 80))
+        png_b = _make_png_bytes((200, 30, 30))
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = _r2_config(d, bootstrap=True)
+            test_app = create_app(config=cfg, engine_factory=lambda: FakeLineOCR(), storage_client=r2)
+            with TestClient(test_app) as client:
+                real_put_manifest = r2.put_manifest
+
+                def _commit_then_ambiguous_timeout(manifest, *, if_match=None, if_none_match_star=False):
+                    real_put_manifest(manifest, if_match=if_match, if_none_match_star=if_none_match_star)
+                    raise storage_service.StorageCommitError(
+                        "HTTP timeout after remote commit",
+                        error_code="manifest_commit_timeout",
+                        ambiguous=True,
+                    )
+
+                # 1) Upload commits on R2, then ambiguous timeout occurs & get_manifest fails temporarily
+                with mock.patch.object(r2, "put_manifest", side_effect=_commit_then_ambiguous_timeout):
+                    r2.get_manifest_override = storage_service.StorageUnavailableError("temporary network glitch")
+                    first = client.post(
+                        "/api/ocr",
+                        files={"file": ("bill_retry.png", png_a, "image/png")},
+                        data={"category": "receipt", "auto_extract": "true"},
+                        headers={"Idempotency-Key": "web-retry-001"},
+                    )
+                self.assertEqual(first.status_code, 503)
+
+                # 2) Retry identical upload + Idempotency-Key -> reconciles and returns original doc without duplicating
+                r2.get_manifest_override = None
+                second = client.post(
+                    "/api/ocr",
+                    files={"file": ("bill_retry.png", png_a, "image/png")},
+                    data={"category": "receipt", "auto_extract": "true"},
+                    headers={"Idempotency-Key": "web-retry-001"},
+                )
+                self.assertEqual(second.status_code, 200, second.text)
+                first_doc_id = second.json()["doc_id"]
+
+                # Third replay also returns same doc_id and keeps document count = 1
+                third = client.post(
+                    "/api/ocr",
+                    files={"file": ("bill_retry.png", png_a, "image/png")},
+                    data={"category": "receipt", "auto_extract": "true"},
+                    headers={"Idempotency-Key": "web-retry-001"},
+                )
+                self.assertEqual(third.status_code, 200)
+                self.assertEqual(third.json()["doc_id"], first_doc_id)
+                self.assertEqual(client.get("/api/documents").json()["total"], 1)
+
+                # 3) Reusing same Idempotency-Key with a DIFFERENT file must fail with 409 Conflict
+                mismatch = client.post(
+                    "/api/ocr",
+                    files={"file": ("other_bill.png", png_b, "image/png")},
+                    data={"category": "receipt", "auto_extract": "true"},
+                    headers={"Idempotency-Key": "web-retry-001"},
+                )
+                self.assertEqual(mismatch.status_code, 409)
+                self.assertEqual(mismatch.json()["error"], "idempotency_payload_mismatch")
+
+    def test_17_f3_watcher_reimport_identical_file_after_document_deletion(self):
+        r2 = InMemoryR2Gateway()
+        png_bytes = _make_png_bytes((90, 120, 40))
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = _r2_config(d, bootstrap=True)
+            test_app = create_app(config=cfg, engine_factory=lambda: FakeLineOCR(), storage_client=r2)
+            with TestClient(test_app) as client:
+                inbox_file = os.path.join(cfg.inbox_dir, "receipt.png")
+                with open(inbox_file, "wb") as fh:
+                    fh.write(png_bytes)
+
+                scan1 = test_app.state.watcher.scan_once(require_stability=False)
+                self.assertEqual(scan1["processed"], 1)
+                doc_id_1 = scan1["doc_ids"][0]
+                self.assertFalse(os.path.exists(inbox_file))
+                self.assertFalse(os.path.exists(f"{inbox_file}.opid"))
+
+                # User deletes the first document from the Vault
+                del_res = client.delete(f"/api/documents/{doc_id_1}")
+                self.assertTrue(del_res.json()["success"])
+                self.assertEqual(client.get("/api/documents").json()["total"], 0)
+
+                # User intentionally drops the identical file into inbox/ again -> must create a new document!
+                with open(inbox_file, "wb") as fh:
+                    fh.write(png_bytes)
+
+                scan2 = test_app.state.watcher.scan_once(require_stability=False)
+                self.assertEqual(scan2["processed"], 1)
+                doc_id_2 = scan2["doc_ids"][0]
+                self.assertNotEqual(doc_id_2, doc_id_1)
+                self.assertFalse(os.path.exists(inbox_file))
+                self.assertFalse(os.path.exists(f"{inbox_file}.opid"))
+                docs = client.get("/api/documents").json()["documents"]
+                self.assertEqual(len(docs), 1)
+                self.assertEqual(docs[0]["id"], doc_id_2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -291,6 +291,45 @@ def init_db(db_path: Optional[str] = None) -> None:
     print("[DB] Database initialized at:", target_path)
 
 
+def has_any_vault_data(db_path: Optional[str] = None) -> bool:
+    """Return True if an existing SQLite file has user data or is a non-empty unreadable file."""
+    target_path = db_path or DB_PATH
+    if not os.path.exists(target_path):
+        return False
+    try:
+        if os.path.getsize(target_path) <= 0:
+            return False
+    except OSError:
+        return True
+
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = sqlite3.connect(target_path)
+        conn.execute("PRAGMA query_only = ON")
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()
+        if not integrity or integrity[0] != "ok":
+            return True
+        tables = [
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        ]
+        for table in tables:
+            lower = str(table).lower()
+            if lower.startswith("sqlite_") or lower.startswith("documents_fts"):
+                continue
+            row = conn.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone()
+            if row is not None:
+                return True
+        return False
+    except sqlite3.Error:
+        return True
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def save_document(
     filename: str,
     file_type: str,
@@ -1347,11 +1386,17 @@ def record_vault_operation(
     result_obj: Optional[Dict[str, Any]],
     revision: int,
     db_path: Optional[str] = None,
+    *,
+    payload_hash: str = "",
 ) -> None:
     """Persist an idempotency record for a completed vault mutation."""
     clean_op_id = (operation_id or "").strip()
     if not clean_op_id:
         return
+    stored_obj = dict(result_obj or {})
+    clean_payload_hash = (payload_hash or "").strip().lower()
+    if clean_payload_hash:
+        stored_obj["_payload_hash"] = clean_payload_hash
     conn = get_db_connection(db_path)
     conn.execute(
         """
@@ -1363,7 +1408,7 @@ def record_vault_operation(
             clean_op_id,
             (op_type or "").strip(),
             (target_id or "").strip(),
-            json.dumps(result_obj or {}, ensure_ascii=False),
+            json.dumps(stored_obj, ensure_ascii=False),
             int(revision),
             _utc_iso(),
         ),
@@ -1393,10 +1438,12 @@ def get_vault_operation(
     if not row:
         return None
     parsed_result: Dict[str, Any] = {}
+    payload_hash = ""
     if row["result_json"]:
         try:
             loaded = json.loads(row["result_json"])
             if isinstance(loaded, dict):
+                payload_hash = str(loaded.pop("_payload_hash", "") or "").strip().lower()
                 parsed_result = loaded
         except Exception:
             parsed_result = {}
@@ -1405,6 +1452,7 @@ def get_vault_operation(
         "op_type": row["op_type"],
         "target_id": row["target_id"],
         "result": parsed_result,
+        "payload_hash": payload_hash,
         "revision": int(row["revision"] or 0),
         "created_at": row["created_at"],
     }

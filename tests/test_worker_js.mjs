@@ -393,6 +393,39 @@ test('DO persists internal auth across DO re-instantiation, strips internal head
   releaseInFlight();
   await slowReqPromise;
 
+  // alarm() does NOT destroy container if a new request arrives while awaiting /api/health
+  let releaseHealth;
+  const healthGate = new Promise((resolve) => {
+    releaseHealth = resolve;
+  });
+  let releaseOcr;
+  const ocrGate = new Promise((resolve) => {
+    releaseOcr = resolve;
+  });
+  harness.setFetchHandler(async (req) => {
+    harness.forwardedRequests.push(req);
+    const reqUrl = new URL(req.url);
+    if (reqUrl.pathname === '/api/health') {
+      await healthGate;
+      return Response.json({ status: 'ok', storage_state: 'READY', busy: false }, { status: 200 });
+    }
+    if (reqUrl.pathname === '/api/ocr') {
+      await ocrGate;
+      return Response.json({ success: true, doc_id: 'doc-race-1' }, { status: 200 });
+    }
+    return new Response('ok', { status: 200 });
+  });
+  const alarmPromise = newDo.alarm();
+  await new Promise((r) => setTimeout(r, 10));
+  const raceOcrPromise = newDo.fetch(new Request('https://nong-chokchuay-ocr.entrace-space.workers.dev/api/ocr'));
+  releaseHealth();
+  await alarmPromise;
+  assert.equal(harness.destroyCount, 0);
+  assert.equal(harness.container.running, true);
+  releaseOcr();
+  const raceRes = await raceOcrPromise;
+  assert.equal(raceRes.status, 200);
+
   // alarm() destroys container once idle & healthy
   harness.setFetchHandler(async (req) => {
     harness.forwardedRequests.push(req);

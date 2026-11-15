@@ -62,6 +62,18 @@ class StorageConflictError(StorageError):
         super().__init__(message, status_code=503, error_code=error_code)
 
 
+class StorageIdempotencyConflictError(StorageError):
+    """Raised when an Idempotency-Key is reused with a different request payload."""
+
+    def __init__(
+        self,
+        message: str = "Idempotency key already used with different payload",
+        *,
+        error_code: str = "idempotency_payload_mismatch",
+    ) -> None:
+        super().__init__(message, status_code=409, error_code=error_code)
+
+
 @dataclass
 class StorageUpload:
     """New Source File payload to upload durably to R2 before committing SQLite snapshot."""
@@ -603,10 +615,26 @@ class VaultStorageCoordinator:
                     except OSError:
                         pass
 
+    def _has_existing_local_uploads(self) -> bool:
+        uploads_dir = self.config.uploads_dir
+        if not uploads_dir or not os.path.isdir(uploads_dir):
+            return False
+        try:
+            with os.scandir(uploads_dir) as it:
+                for entry in it:
+                    if not entry.name.startswith(".") and entry.is_file():
+                        return True
+        except OSError:
+            return True
+        return False
+
     def _bootstrap_empty_bucket(self, client: R2ClientProtocol) -> None:
-        if os.path.exists(self.config.db_path):
-            os.remove(self.config.db_path)
-        database.remove_sqlite_sidecars(self.config.db_path)
+        if database.has_any_vault_data(self.config.db_path) or self._has_existing_local_uploads():
+            raise StorageUnavailableError(
+                "Refusing to bootstrap empty R2 bucket because local Vault already contains existing data",
+                error_code="bootstrap_refused_non_empty_local_db",
+            )
+
         database.init_db(self.config.db_path)
 
         snap_tmp = f"{self.config.db_path}.bootstrap.{uuid.uuid4().hex[:8]}.tmp"
@@ -686,26 +714,56 @@ class VaultStorageCoordinator:
             and meta["snapshot_key"] == pending["snapshot_key"]
         ):
             snap_tmp = pending.get("snap_tmp_path")
+            synced = False
             if snap_tmp and os.path.exists(snap_tmp):
-                _atomic_copy_file(snap_tmp, self.committed_db_path)
                 try:
-                    os.remove(snap_tmp)
-                except OSError:
-                    pass
-            else:
-                database.export_db_snapshot(self.config.db_path, self.committed_db_path)
+                    _atomic_copy_file(snap_tmp, self.committed_db_path)
+                    synced = True
+                    try:
+                        os.remove(snap_tmp)
+                    except OSError:
+                        pass
+                except Exception:
+                    synced = False
+
+            if not synced:
+                try:
+                    database.export_db_snapshot(self.config.db_path, self.committed_db_path)
+                    synced = True
+                except Exception:
+                    synced = False
+
+            if not synced:
+                restore_tmp = f"{self.config.db_path}.reconcile.{uuid.uuid4().hex[:8]}.tmp"
+                try:
+                    client.get_snapshot(meta["snapshot_key"], restore_tmp)
+                    database.validate_sqlite_snapshot_file(
+                        restore_tmp,
+                        expected_size=meta["snapshot_size"],
+                        expected_sha256=meta["snapshot_sha256"],
+                    )
+                    self._activate_validated_snapshot(restore_tmp)
+                finally:
+                    if os.path.exists(restore_tmp):
+                        try:
+                            os.remove(restore_tmp)
+                        except OSError:
+                            pass
 
             self.current_revision = meta["revision"]
             self.manifest_etag = etag
             self._retained_snapshots = list(meta["retained_snapshots"])
             self._dirty_uncommitted = False
             self._pending_commit = None
-            self._run_post_commit_cleanup(
-                client=client,
-                cleanup_local_paths=pending.get("cleanup_local_paths") or [],
-                expired_snapshots=pending.get("expired_snapshots") or [],
-                retained_snapshots=self._retained_snapshots,
-            )
+            try:
+                self._run_post_commit_cleanup(
+                    client=client,
+                    cleanup_local_paths=pending.get("cleanup_local_paths") or [],
+                    expired_snapshots=pending.get("expired_snapshots") or [],
+                    retained_snapshots=self._retained_snapshots,
+                )
+            except Exception as cleanup_exc:
+                print(f"[R2 Cleanup] Non-fatal reconciliation cleanup error: {cleanup_exc}")
             return
 
         if meta["revision"] == self.current_revision and etag == self.manifest_etag:
@@ -744,14 +802,29 @@ class VaultStorageCoordinator:
                 if self._dirty_uncommitted:
                     self._reconcile_dirty_state()
 
-    def get_committed_operation(self, operation_id: str) -> Optional[Dict[str, Any]]:
+    @staticmethod
+    def _assert_idempotency_payload_match(existing_op: Dict[str, Any], expected_payload_hash: str) -> None:
+        expected = (expected_payload_hash or "").strip().lower()
+        stored = str(existing_op.get("payload_hash") or "").strip().lower()
+        if expected and stored and expected != stored:
+            raise StorageIdempotencyConflictError()
+
+    def get_committed_operation(
+        self,
+        operation_id: str,
+        *,
+        expected_payload_hash: str = "",
+    ) -> Optional[Dict[str, Any]]:
         clean_op_id = (operation_id or "").strip()
         if not clean_op_id:
             return None
         with self._mutation_lock:
             self.require_ready()
             row = database.get_vault_operation(clean_op_id, db_path=self.config.db_path)
-            return row["result"] if row else None
+            if not row:
+                return None
+            self._assert_idempotency_payload_match(row, expected_payload_hash)
+            return row["result"]
 
     def _run_post_commit_cleanup(
         self,
@@ -799,9 +872,11 @@ class VaultStorageCoordinator:
         *,
         new_upload: Optional[StorageUpload] = None,
         cleanup_local_paths_after_commit: Optional[List[str]] = None,
+        payload_hash: str = "",
     ) -> Dict[str, Any]:
         """Serialize a state mutation and durably commit to R2 before returning."""
         clean_op_id = (operation_id or "").strip()
+        clean_payload_hash = (payload_hash or "").strip().lower()
         cleanup_paths = cleanup_local_paths_after_commit if cleanup_local_paths_after_commit is not None else []
 
         with self._mutation_lock:
@@ -812,6 +887,7 @@ class VaultStorageCoordinator:
                 if clean_op_id:
                     existing_op = database.get_vault_operation(clean_op_id, db_path=self.config.db_path)
                     if existing_op:
+                        self._assert_idempotency_payload_match(existing_op, clean_payload_hash)
                         return existing_op["result"]
 
                 next_rev = self.current_revision + 1
@@ -830,6 +906,7 @@ class VaultStorageCoordinator:
                             res,
                             next_rev,
                             db_path=self.config.db_path,
+                            payload_hash=clean_payload_hash,
                         )
                     for path in cleanup_paths:
                         if path and os.path.exists(path):
@@ -870,6 +947,7 @@ class VaultStorageCoordinator:
                             res,
                             next_rev,
                             db_path=self.config.db_path,
+                            payload_hash=clean_payload_hash,
                         )
 
                     snap_meta = database.export_db_snapshot(self.config.db_path, snap_tmp_path)
@@ -915,23 +993,6 @@ class VaultStorageCoordinator:
                     }
 
                     new_etag = client.put_manifest(manifest, if_match=self.manifest_etag)
-
-                    _atomic_copy_file(snap_tmp_path, self.committed_db_path)
-                    if os.path.exists(snap_tmp_path):
-                        os.remove(snap_tmp_path)
-                    self.current_revision = next_rev
-                    self.manifest_etag = new_etag
-                    self._retained_snapshots = retained
-                    self._dirty_uncommitted = False
-                    self._pending_commit = None
-
-                    self._run_post_commit_cleanup(
-                        client=client,
-                        cleanup_local_paths=list(cleanup_paths),
-                        expired_snapshots=expired,
-                        retained_snapshots=retained,
-                    )
-                    return res
 
                 except StorageConflictError:
                     self.state = "ERROR"
@@ -984,6 +1045,38 @@ class VaultStorageCoordinator:
                         f"Mutation failed before durable R2 commit: {exc}",
                         error_code="mutation_aborted",
                     ) from exc
+
+                # Manifest commit on R2 succeeded above. Never rollback local DB after this point;
+                # keep dirty/pending state intact on local finalization error so require_ready() reconciles.
+                try:
+                    _atomic_copy_file(snap_tmp_path, self.committed_db_path)
+                    if os.path.exists(snap_tmp_path):
+                        try:
+                            os.remove(snap_tmp_path)
+                        except OSError:
+                            pass
+                    self.current_revision = next_rev
+                    self.manifest_etag = new_etag
+                    self._retained_snapshots = retained
+                    self._dirty_uncommitted = False
+                    self._pending_commit = None
+                except Exception as post_exc:
+                    raise StorageCommitError(
+                        f"Committed revision {next_rev} to R2 but local finalization failed: {post_exc}",
+                        error_code="post_commit_sync_failed",
+                        ambiguous=False,
+                    ) from post_exc
+
+                try:
+                    self._run_post_commit_cleanup(
+                        client=client,
+                        cleanup_local_paths=list(cleanup_paths),
+                        expired_snapshots=expired,
+                        retained_snapshots=retained,
+                    )
+                except Exception as cleanup_exc:
+                    print(f"[R2 Cleanup] Non-fatal post-commit cleanup error at rev {next_rev}: {cleanup_exc}")
+                return res
             finally:
                 self._active_mutations = max(0, self._active_mutations - 1)
 

@@ -364,10 +364,15 @@ export class NongChokChuayOCR extends DurableObject {
   }
 
   async fetch(request) {
+    this._requestSeq = (this._requestSeq || 0) + 1;
     this._activeRequests = (this._activeRequests || 0) + 1;
     await this.ctx.storage.setAlarm(Date.now() + SLEEP_AFTER_MS);
 
     try {
+      if (this._destroyingPromise) {
+        await this._destroyingPromise;
+      }
+
       const container = this.ctx.container;
       if (!container) {
         return Response.json(
@@ -428,6 +433,10 @@ export class NongChokChuayOCR extends DurableObject {
   }
 
   async alarm() {
+    if (this._destroyingPromise) {
+      await this.ctx.storage.setAlarm(Date.now() + SLEEP_AFTER_MS);
+      return;
+    }
     if (!this.ctx.container || !this.ctx.container.running) {
       return;
     }
@@ -436,6 +445,7 @@ export class NongChokChuayOCR extends DurableObject {
       return;
     }
 
+    const seqBefore = this._requestSeq || 0;
     try {
       const port = this.ctx.container.getTcpPort(CONTAINER_PORT);
       const healthRes = await port.fetch(new Request("http://container/api/health", { method: "GET" }));
@@ -450,7 +460,18 @@ export class NongChokChuayOCR extends DurableObject {
       // Ignore non-JSON or unreachable health responses when idle alarm fires.
     }
 
-    await this.ctx.container.destroy();
+    if ((this._activeRequests || 0) > 0 || (this._requestSeq || 0) !== seqBefore) {
+      await this.ctx.storage.setAlarm(Date.now() + SLEEP_AFTER_MS);
+      return;
+    }
+
+    const destroying = Promise.resolve(this.ctx.container.destroy()).finally(() => {
+      if (this._destroyingPromise === destroying) {
+        this._destroyingPromise = null;
+      }
+    });
+    this._destroyingPromise = destroying;
+    await destroying;
   }
 }
 

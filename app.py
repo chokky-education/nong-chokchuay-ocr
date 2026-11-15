@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -76,6 +77,25 @@ _KINDERGARTEN_PRESETS = {
     "student_profile": "sample_student_profile.png",
     "school_circular": "sample_school_notice.png",
 }
+
+
+def _resolve_idempotency_key(request: Request, explicit_key: str = "", scope: str = "api") -> str:
+    raw = (
+        request.headers.get("Idempotency-Key")
+        or request.headers.get("X-Idempotency-Key")
+        or explicit_key
+        or ""
+    ).strip()
+    if not raw:
+        return ""
+    if len(raw) > 200 or any(ord(ch) < 32 for ch in raw):
+        raise HTTPException(status_code=400, detail="Invalid Idempotency-Key")
+    return f"{scope}:{raw}"
+
+
+def _compute_json_payload_hash(payload_obj: Any) -> str:
+    encoded = json.dumps(payload_obj, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _default_engine_factory() -> LineOCR:
@@ -166,16 +186,19 @@ def create_app(
             or norm_path == "/api/health"
             or norm_path.startswith("/static/")
         )
-        if not is_storage_exempt and storage.state != "READY":
-            return JSONResponse(
-                status_code=503,
-                content={
-                    "success": False,
-                    "detail": "Vault storage is not ready",
-                    "error": storage.error_code or "storage_unavailable",
-                    "storage_state": storage.state,
-                },
-            )
+        if not is_storage_exempt:
+            try:
+                await run_in_threadpool(storage.require_ready)
+            except storage_service.StorageError as exc:
+                return JSONResponse(
+                    status_code=exc.status_code,
+                    content={
+                        "success": False,
+                        "detail": str(exc),
+                        "error": exc.error_code,
+                        "storage_state": storage.state,
+                    },
+                )
 
         if not cfg.auth_required:
             return await call_next(request)
@@ -225,6 +248,7 @@ def create_app(
 
     @application.get("/api/auth/me")
     def get_auth_me(request: Request):
+        storage.require_ready()
         session = auth_service.authenticate_request(request, cfg) if cfg.auth_required else None
         return {
             "authenticated": bool(session) if cfg.auth_required else True,
@@ -371,7 +395,8 @@ def create_app(
         return FileResponse(fpath)
 
     @application.post("/api/samples/kindergarten/{preset}")
-    def run_kindergarten_preset(preset: str):
+    def run_kindergarten_preset(request: Request, preset: str):
+        op_id = _resolve_idempotency_key(request, scope=f"web_sample:{preset}")
         fname = _KINDERGARTEN_PRESETS.get(preset)
         if not fname:
             raise HTTPException(status_code=404, detail="Preset not found")
@@ -391,6 +416,7 @@ def create_app(
             ingestion_channel="web_upload",
             auto_extract=True,
             storage=storage,
+            operation_id=op_id,
         )
         return JSONResponse(result)
 
@@ -455,8 +481,15 @@ def create_app(
         return FileResponse(src_path, filename=doc.get("filename") or os.path.basename(src_path))
 
     @application.patch("/api/documents/{doc_id}")
-    def update_document(doc_id: str, payload: DocumentUpdateRequest):
+    def update_document(request: Request, doc_id: str, payload: DocumentUpdateRequest):
         storage.require_ready()
+        op_id = _resolve_idempotency_key(request, scope=f"web_doc_update:{doc_id}")
+        p_hash = _compute_json_payload_hash({"doc_id": doc_id, **payload.model_dump()})
+        if op_id:
+            existing_op = storage.get_committed_operation(op_id, expected_payload_hash=p_hash)
+            if existing_op is not None:
+                return existing_op
+
         r2_enabled = cfg.is_r2_enabled()
         existing = database.get_document_by_id(doc_id, db_path=cfg.db_path, r2_enabled=r2_enabled)
         if not existing:
@@ -475,11 +508,24 @@ def create_app(
             )
             return {"success": True, "doc_id": doc_id, "document": updated}
 
-        return storage.execute_mutation("", "update_document", _do_update)
+        return storage.execute_mutation(op_id, "update_document", _do_update, payload_hash=p_hash)
 
     @application.post("/api/documents/{doc_id}/review")
-    def review_document(doc_id: str, payload: Optional[DocumentReviewRequest] = Body(default=None)):
+    def review_document(
+        request: Request,
+        doc_id: str,
+        payload: Optional[DocumentReviewRequest] = Body(default=None),
+    ):
         storage.require_ready()
+        op_id = _resolve_idempotency_key(request, scope=f"web_doc_review:{doc_id}")
+        p_hash = _compute_json_payload_hash(
+            {"doc_id": doc_id, "payload": payload.model_dump() if payload else None}
+        )
+        if op_id:
+            existing_op = storage.get_committed_operation(op_id, expected_payload_hash=p_hash)
+            if existing_op is not None:
+                return existing_op
+
         r2_enabled = cfg.is_r2_enabled()
         existing = database.get_document_by_id(doc_id, db_path=cfg.db_path, r2_enabled=r2_enabled)
         if not existing:
@@ -514,11 +560,18 @@ def create_app(
                 updated["expense"] = updated_exp
             return {"success": True, "doc_id": doc_id, "document": updated}
 
-        return storage.execute_mutation("", "review_document", _do_review)
+        return storage.execute_mutation(op_id, "review_document", _do_review, payload_hash=p_hash)
 
     @application.delete("/api/documents/{doc_id}")
-    def delete_document(doc_id: str):
+    def delete_document(request: Request, doc_id: str):
         storage.require_ready()
+        op_id = _resolve_idempotency_key(request, scope=f"web_doc_delete:{doc_id}")
+        p_hash = _compute_json_payload_hash({"doc_id": doc_id})
+        if op_id:
+            existing_op = storage.get_committed_operation(op_id, expected_payload_hash=p_hash)
+            if existing_op is not None:
+                return {"success": bool(existing_op.get("success")), "deleted_id": doc_id}
+
         r2_enabled = cfg.is_r2_enabled()
         existing = database.get_document_by_id(doc_id, db_path=cfg.db_path, r2_enabled=r2_enabled)
         if not existing:
@@ -537,10 +590,11 @@ def create_app(
             return {"success": success, "deleted_id": doc_id, "doc_id": doc_id}
 
         res = storage.execute_mutation(
-            "",
+            op_id,
             "delete_document",
             _do_delete,
             cleanup_local_paths_after_commit=removed_paths,
+            payload_hash=p_hash,
         )
         return {"success": bool(res.get("success")), "deleted_id": doc_id}
 
@@ -568,8 +622,19 @@ def create_app(
 
     # Expense Extraction & Reporting Endpoints
     @application.post("/api/documents/{doc_id}/extract")
-    def extract_document_expense(doc_id: str, extraction_method: str = Query("auto")):
+    def extract_document_expense(
+        request: Request,
+        doc_id: str,
+        extraction_method: str = Query("auto"),
+    ):
         storage.require_ready()
+        op_id = _resolve_idempotency_key(request, scope=f"web_doc_extract:{doc_id}")
+        p_hash = _compute_json_payload_hash({"doc_id": doc_id, "extraction_method": extraction_method})
+        if op_id:
+            existing_op = storage.get_committed_operation(op_id, expected_payload_hash=p_hash)
+            if existing_op is not None:
+                return existing_op
+
         r2_enabled = cfg.is_r2_enabled()
         doc = database.get_document_by_id(doc_id, db_path=cfg.db_path, r2_enabled=r2_enabled)
         if not doc:
@@ -594,7 +659,7 @@ def create_app(
             )
             return {"success": True, "doc_id": doc_id, "expense": expense, "student": student, "document": updated_doc}
 
-        return storage.execute_mutation("", "extract_document", _do_extract)
+        return storage.execute_mutation(op_id, "extract_document", _do_extract, payload_hash=p_hash)
 
     @application.get("/api/expenses")
     def list_expenses(
@@ -614,8 +679,15 @@ def create_app(
         return {"success": True, **data}
 
     @application.put("/api/expenses/{doc_id}")
-    def update_expense(doc_id: str, payload: ExpenseUpsertRequest):
+    def update_expense(request: Request, doc_id: str, payload: ExpenseUpsertRequest):
         storage.require_ready()
+        op_id = _resolve_idempotency_key(request, scope=f"web_expense_upsert:{doc_id}")
+        p_hash = _compute_json_payload_hash({"doc_id": doc_id, **payload.model_dump()})
+        if op_id:
+            existing_op = storage.get_committed_operation(op_id, expected_payload_hash=p_hash)
+            if existing_op is not None:
+                return existing_op
+
         doc = database.get_document_by_id(
             doc_id, db_path=cfg.db_path, r2_enabled=cfg.is_r2_enabled()
         )
@@ -640,7 +712,7 @@ def create_app(
             )
             return {"success": True, "doc_id": doc_id, "expense": expense}
 
-        return storage.execute_mutation("", "upsert_expense", _do_upsert_expense)
+        return storage.execute_mutation(op_id, "upsert_expense", _do_upsert_expense, payload_hash=p_hash)
 
     @application.delete("/api/expenses/{doc_id}")
     def delete_expense(doc_id: str):
@@ -748,8 +820,15 @@ def create_app(
         return {"success": True, **data}
 
     @application.post("/api/students")
-    def create_student(payload: StudentUpsertRequest):
+    def create_student(request: Request, payload: StudentUpsertRequest):
         storage.require_ready()
+        op_id = _resolve_idempotency_key(request, scope="web_student_create")
+        p_hash = _compute_json_payload_hash(payload.model_dump())
+        if op_id:
+            existing_op = storage.get_committed_operation(op_id, expected_payload_hash=p_hash)
+            if existing_op is not None:
+                return existing_op
+
         if payload.document_id:
             doc = database.get_document_by_id(
                 payload.document_id, db_path=cfg.db_path, r2_enabled=cfg.is_r2_enabled()
@@ -775,7 +854,7 @@ def create_app(
             )
             return {"success": True, "id": student.get("id", ""), "student": student}
 
-        return storage.execute_mutation("", "create_student", _do_create_student)
+        return storage.execute_mutation(op_id, "create_student", _do_create_student, payload_hash=p_hash)
 
     @application.put("/api/students/{student_id}")
     def update_student(student_id: str, payload: StudentUpsertRequest):
@@ -1050,11 +1129,14 @@ def create_app(
 
     @application.post("/api/line/simulate")
     async def line_simulate(
+        request: Request,
         text: str = Form(""),
         postback_data: str = Form(""),
         file: Optional[UploadFile] = File(None),
+        operation_id: str = Form(""),
     ):
         storage.require_ready()
+        op_id = _resolve_idempotency_key(request, operation_id, scope="web_line_sim")
         if postback_data.strip():
             res = line_service.handle_line_postback(
                 postback_data.strip(),
@@ -1062,6 +1144,7 @@ def create_app(
                 config=cfg,
                 teacher_name=cfg.teacher_name,
                 storage=storage,
+                operation_id=op_id,
             )
             return JSONResponse({"mode": "postback", **res})
 
@@ -1080,6 +1163,7 @@ def create_app(
                 line_user_id="sim-teacher",
                 auto_extract=True,
                 storage=storage,
+                operation_id=op_id,
             )
             summary = line_service.build_nong_chok_reply_summary(
                 ocr_res,
@@ -1108,6 +1192,7 @@ def create_app(
     # OCR Processing Endpoint
     @application.post("/api/ocr")
     async def process_ocr(
+        request: Request,
         file: UploadFile = File(...),
         page: int = Form(1),
         process_all_pages: bool = Form(False),
@@ -1116,10 +1201,12 @@ def create_app(
         tags: str = Form(""),
         doc_date: str = Form(""),
         auto_extract: Optional[bool] = Form(None),
+        operation_id: str = Form(""),
     ):
         try:
             if save_to_db:
                 storage.require_ready()
+            op_id = _resolve_idempotency_key(request, operation_id, scope="web_ocr") if save_to_db else ""
             contents = await file.read()
             engine = get_engine()
             result = ocr_service.ingest_document(
@@ -1137,6 +1224,7 @@ def create_app(
                 doc_date=doc_date,
                 auto_extract=auto_extract,
                 storage=storage if save_to_db else None,
+                operation_id=op_id,
             )
             return JSONResponse(result)
         except storage_service.StorageError:

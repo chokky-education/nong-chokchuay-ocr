@@ -3,6 +3,7 @@ import os
 import shutil
 import threading
 import time
+import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -12,7 +13,7 @@ from config import AppConfig
 from storage_service import VaultStorageCoordinator
 
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".tif", ".pdf"}
-IGNORED_SUFFIXES = (".tmp", ".part", ".crdownload", ".download")
+IGNORED_SUFFIXES = (".tmp", ".part", ".crdownload", ".download", ".opid")
 
 
 def _map_subfolder_to_tags(subfolder_name: str) -> List[str]:
@@ -59,8 +60,72 @@ class InboxWatcher:
         _, ext = os.path.splitext(lower)
         return ext in SUPPORTED_EXTENSIONS
 
+    def _opid_sidecar_path(self, full_path: str) -> str:
+        return f"{full_path}.opid"
+
+    def _remove_opid_sidecar(self, full_path: str) -> None:
+        sidecar = self._opid_sidecar_path(full_path)
+        if os.path.exists(sidecar):
+            try:
+                os.remove(sidecar)
+            except OSError:
+                pass
+
+    def _get_or_create_operation_id(
+        self,
+        full_path: str,
+        rel_path: str,
+        file_size: int,
+        file_sha256: str,
+    ) -> str:
+        sidecar = self._opid_sidecar_path(full_path)
+        prefix = f"{file_size}:{file_sha256}:"
+        if os.path.isfile(sidecar):
+            try:
+                with open(sidecar, "r", encoding="utf-8") as fh:
+                    raw = fh.read().strip()
+                if raw.startswith(prefix):
+                    existing = raw[len(prefix):].strip()
+                    if existing:
+                        return existing
+            except OSError:
+                pass
+
+        op_id = f"watcher:{rel_path}:{file_size}:{file_sha256}:{uuid.uuid4().hex[:12]}"
+        tmp_sidecar = f"{sidecar}.{uuid.uuid4().hex[:8]}.tmp"
+        try:
+            with open(tmp_sidecar, "w", encoding="utf-8") as fh:
+                fh.write(f"{prefix}{op_id}\n")
+            os.replace(tmp_sidecar, sidecar)
+        except OSError:
+            if os.path.exists(tmp_sidecar):
+                try:
+                    os.remove(tmp_sidecar)
+                except OSError:
+                    pass
+        return op_id
+
+    def _cleanup_orphan_opids(self) -> None:
+        if not os.path.isdir(self.config.inbox_dir):
+            return
+        for root_dir in [self.config.inbox_dir] + [
+            os.path.join(self.config.inbox_dir, d)
+            for d in os.listdir(self.config.inbox_dir)
+            if not d.startswith(".") and os.path.isdir(os.path.join(self.config.inbox_dir, d))
+        ]:
+            for entry in os.listdir(root_dir):
+                if entry.lower().endswith(".opid"):
+                    sidecar_path = os.path.join(root_dir, entry)
+                    parent_path = sidecar_path[:-5]
+                    if not os.path.exists(parent_path):
+                        try:
+                            os.remove(sidecar_path)
+                        except OSError:
+                            pass
+
     def _quarantine_file(self, file_path: str, filename: str, error_msg: str) -> None:
         os.makedirs(self.config.inbox_failed_dir, exist_ok=True)
+        self._remove_opid_sidecar(file_path)
         dest_path = os.path.join(self.config.inbox_failed_dir, filename)
         if os.path.exists(dest_path):
             stem, ext = os.path.splitext(filename)
@@ -107,6 +172,7 @@ class InboxWatcher:
             self.is_scanning = True
             try:
                 self.config.ensure_dirs()
+                self._cleanup_orphan_opids()
                 processed_ids: List[str] = []
                 failed_files: List[str] = []
                 skipped = 0
@@ -136,7 +202,12 @@ class InboxWatcher:
                             contents = fh.read()
                         file_sha256 = hashlib.sha256(contents).hexdigest()
                         rel_path = os.path.relpath(full_path, self.config.inbox_dir)
-                        op_id = f"watcher:{rel_path}:{len(contents)}:{file_sha256}"
+                        op_id = self._get_or_create_operation_id(
+                            full_path,
+                            rel_path,
+                            len(contents),
+                            file_sha256,
+                        )
 
                         engine = self.engine_getter()
                         res = ocr_service.ingest_document(
@@ -152,6 +223,7 @@ class InboxWatcher:
                             operation_id=op_id,
                         )
                         os.remove(full_path)
+                        self._remove_opid_sidecar(full_path)
                         if res.get("doc_id"):
                             processed_ids.append(res["doc_id"])
                     except storage_service.StorageError as exc:
@@ -188,6 +260,7 @@ class InboxWatcher:
             for name in os.listdir(self.config.inbox_failed_dir)
             if os.path.isfile(os.path.join(self.config.inbox_failed_dir, name))
             and not name.endswith(".error.txt")
+            and not name.lower().endswith(".opid")
         ]
         return {
             "enabled": self.config.inbox_poll_seconds > 0,

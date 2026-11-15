@@ -76,6 +76,8 @@
     currentPdfTotalPages: 1,
     currentLines: [],
     lineBoxes: [],
+    pendingUploadKey: '',
+    pendingUploadSignature: '',
   };
 
   const $ = (id) => document.getElementById(id);
@@ -850,9 +852,31 @@
     }
   }
 
+  function resolveUploadIdempotencyKey(file, page, processAllPages) {
+    const autoExtract = Boolean(els.toggleAutoExtract && els.toggleAutoExtract.checked);
+    const signature = [
+      file.name || '',
+      file.size ?? '',
+      file.lastModified ?? '',
+      page,
+      Boolean(processAllPages),
+      autoExtract,
+    ].join(':');
+    if (state.pendingUploadSignature !== signature || !state.pendingUploadKey) {
+      const randomKey =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `web-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      state.pendingUploadSignature = signature;
+      state.pendingUploadKey = randomKey;
+    }
+    return state.pendingUploadKey;
+  }
+
   async function uploadAndProcessFile(file, page = 1, processAllPages = false) {
     if (!file) return;
     state.currentFile = file;
+    const idempotencyKey = resolveUploadIdempotencyKey(file, page, processAllPages);
     showLoading(true, 'น้องโชคกำลังช่วยอ่านเอกสารและจัดหมวดหมู่ให้นะครับ...');
     try {
       const formData = new FormData();
@@ -862,11 +886,21 @@
       formData.append('save_to_db', 'true');
       formData.append('auto_extract', String(Boolean(els.toggleAutoExtract.checked)));
 
-      const result = await apiFetch('/api/ocr', { method: 'POST', body: formData });
+      const result = await apiFetch('/api/ocr', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': idempotencyKey },
+        body: formData,
+      });
+      state.pendingUploadKey = '';
+      state.pendingUploadSignature = '';
       renderDocumentResult(result);
       await loadSystemStats();
       showToast('น้องโชคอ่านเอกสารและจัดเก็บให้เรียบร้อยแล้วครับ!');
     } catch (err) {
+      if (err && err.status && err.status >= 400 && err.status < 500 && err.status !== 408 && err.status !== 429) {
+        state.pendingUploadKey = '';
+        state.pendingUploadSignature = '';
+      }
       showToast(`อ่านเอกสารไม่สำเร็จ: ${err.message}`, '❌');
     } finally {
       showLoading(false);

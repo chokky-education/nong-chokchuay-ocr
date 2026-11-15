@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import io
+import json
 import os
 import time
 import uuid
@@ -150,6 +151,37 @@ def apply_intelligence_to_document(
     return updated_doc, expense_record, student_record
 
 
+def _compute_ingest_payload_hash(
+    *,
+    source_sha256: str,
+    filename: str,
+    page: int,
+    process_all_pages: bool,
+    category: str,
+    tags: List[str],
+    doc_date: str,
+    auto_extract: bool,
+    ingestion_channel: str,
+    review_status: str,
+    line_user_id: str,
+) -> str:
+    payload = {
+        "source_sha256": source_sha256,
+        "filename": filename or "unknown",
+        "page": int(page),
+        "process_all_pages": bool(process_all_pages),
+        "category": category,
+        "tags": tags,
+        "doc_date": (doc_date or "").strip(),
+        "auto_extract": bool(auto_extract),
+        "ingestion_channel": ingestion_channel or "web_upload",
+        "review_status": review_status or "pending_review",
+        "line_user_id": (line_user_id or "").strip(),
+    }
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def ingest_document(
     contents: bytes,
     filename: str,
@@ -171,10 +203,31 @@ def ingest_document(
     operation_id: str = "",
 ) -> Dict[str, Any]:
     """Run OCR on image/PDF bytes and optionally persist Source File, Vault Document, Expense Record, and Student Profile."""
+    clean_tags = database.normalize_tags(tags)
+    clean_category = (category or "general").strip() or "general"
+    should_auto_extract = config.auto_extract_on_ingest if auto_extract is None else auto_extract
+    source_sha256 = hashlib.sha256(contents).hexdigest()
+    payload_hash = _compute_ingest_payload_hash(
+        source_sha256=source_sha256,
+        filename=filename or "unknown",
+        page=page,
+        process_all_pages=process_all_pages,
+        category=clean_category,
+        tags=clean_tags,
+        doc_date=doc_date,
+        auto_extract=bool(should_auto_extract),
+        ingestion_channel=ingestion_channel,
+        review_status=review_status,
+        line_user_id=line_user_id,
+    )
+
     if save_to_db and storage is not None:
         storage.require_ready()
         if operation_id:
-            existing_op = storage.get_committed_operation(operation_id)
+            existing_op = storage.get_committed_operation(
+                operation_id,
+                expected_payload_hash=payload_hash,
+            )
             if existing_op is not None:
                 return existing_op
 
@@ -238,14 +291,10 @@ def ingest_document(
     confidences = [l["confidence"] for l in all_lines if l.get("confidence") is not None]
     avg_conf = round(sum(confidences) / len(confidences), 4) if confidences else 1.0
 
-    clean_tags = database.normalize_tags(tags)
-    clean_category = (category or "general").strip() or "general"
-
     doc_id: Optional[str] = None
     source_path = ""
     expense_record: Optional[Dict[str, Any]] = None
     student_record: Optional[Dict[str, Any]] = None
-    should_auto_extract = config.auto_extract_on_ingest if auto_extract is None else auto_extract
 
     def _build_result(
         *,
@@ -294,7 +343,6 @@ def ingest_document(
         doc_id = str(uuid.uuid4())
         ext = _safe_extension(filename, is_pdf)
         storage_key = f"{doc_id}{ext}"
-        source_sha256 = hashlib.sha256(contents).hexdigest()
         source_path = os.path.join(config.uploads_dir, storage_key)
 
         intel: Optional[Dict[str, Any]] = None
@@ -372,6 +420,7 @@ def ingest_document(
                     sha256=source_sha256,
                     content_type=upload_mime,
                 ),
+                payload_hash=payload_hash,
             )
 
         source_path = _persist_source_file(contents, doc_id, filename, is_pdf, config.uploads_dir)
