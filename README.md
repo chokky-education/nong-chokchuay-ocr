@@ -41,11 +41,7 @@
 - **ความปลอดภัย (Privacy-first):** ประมวลผลภาพบนเซิร์ฟเวอร์ตัวเอง 100% เก็บไฟล์ต้นฉบับใน `data/uploads/` และต่อให้เปิด LLM เสริม ก็ส่งเฉพาะข้อความ Text ที่อ่านได้เท่านั้น
 - **Watch Folder (`data/inbox/`):** โยนไฟล์ภาพหรือ PDF ลงโฟลเดอร์ `data/inbox/` เพื่อให้ระบบดูดไปสแกนและจัดเก็บอัตโนมัติ (ไฟล์เสียถูกแยกเข้า `data/inbox_failed/` พร้อม `.error.txt`)
 
-### การตั้งค่า `.env` และรันชุดทดสอบ
-```bash
-cp .env.example .env  # ตั้งค่า LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN, PUBLIC_BASE_URL หรือ LLM_API_KEY
-./.venv/bin/python -m unittest discover -s tests -v
-```
+วิธีเตรียมเครื่องและรันชุดทดสอบอยู่ใน [คู่มือทำงานกับ Agent](docs/agent-workflow.md)
 
 ---
 
@@ -102,10 +98,11 @@ openthai-ocr-app/
 
 ## 3. วิธีเริ่มใช้งานแบบรวดเร็ว (Quick Start)
 
-### วิธีที่ 1: รันผ่านสคริปต์อัตโนมัติ (macOS / Linux)
+ถ้าเพิ่ง clone ให้เตรียม Python และ dependency ตาม [วิธีรันในเครื่อง](docs/agent-workflow.md#รันและตรวจในเครื่อง) ก่อน
+
+### วิธีที่ 1: รันผ่านสคริปต์บน macOS
 
 ```bash
-cd /Users/chalisa/openthai-ocr-app
 ./start.sh
 ```
 สคริปต์จะเริ่มเซิร์ฟเวอร์ที่ `http://127.0.0.1:8765` และเปิดหน้าเว็บให้โดยอัตโนมัติ
@@ -113,9 +110,7 @@ cd /Users/chalisa/openthai-ocr-app
 ### วิธีที่ 2: รันผ่านคำสั่ง Python โดยตรง
 
 ```bash
-cd /Users/chalisa/openthai-ocr-app
-source .venv/bin/activate
-uvicorn app:app --host 127.0.0.1 --port 8765 --reload
+./.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8765 --reload
 ```
 
 ---

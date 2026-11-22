@@ -8,6 +8,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      approved_sha:
+        description: Full commit SHA approved for production deployment
+        required: true
+        type: string
 
 jobs:
   test:
@@ -42,9 +47,18 @@ jobs:
 
   deploy-cloudflare:
     needs: test
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
+      - name: Confirm approved revision
+        env:
+          APPROVED_SHA: ${{ inputs.approved_sha }}
+        run: |
+          if [ "$APPROVED_SHA" != "$GITHUB_SHA" ]; then
+            echo "::error::The approved SHA does not match this workflow run."
+            exit 1
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -58,7 +72,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
-            echo "CLOUDFLARE_API_TOKEN secret is not configured; skipping deploy."
-            exit 0
+            echo "::error::CLOUDFLARE_API_TOKEN secret is required to deploy."
+            exit 1
           fi
           npx wrangler deploy

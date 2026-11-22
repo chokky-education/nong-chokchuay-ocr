@@ -91,7 +91,7 @@
 | `Dockerfile` | สร้างอิมเมจ Python 3.11-slim พร้อมไลบรารีระบบและโมเดล ONNX สำหรับรันบนพอร์ต `8765` |
 | `worker.js` | Cloudflare Worker (`VaultR2Gateway` + Durable Object `NongChokChuayOCR` แบบ `singleton`) บังคับ Auth/HTTPS header, ยืนยัน internal sync token/epoch, คั่นคำขอ `http://r2.internal`, เช็ก `busy`/`RESTORING` ใน `alarm()`, และรีสตาร์ต Container เมื่อ secret เปลี่ยน |
 | `wrangler.toml` | ค่าตั้งต้นสำหรับ Deploy ขึ้น Cloudflare Workers Paid (ค่าพื้นฐาน $5/เดือน พร้อมโควตา) + Containers (`max_instances = 1`) + Private R2 Bucket (`VAULT_BUCKET` / `nong-chokchuay-vault`) |
-| `.github/workflows/deploy-cloudflare.yml` | GitHub Actions CI/CD สำหรับรันชุดทดสอบ Python + Node (`worker.js`, `static/app.js`) และสั่ง `npx wrangler deploy` เมื่อมี `CLOUDFLARE_API_TOKEN` |
+| `.github/workflows/deploy-cloudflare.yml` | GitHub Actions รันชุดทดสอบ Python + Node บน PR และ `main` ส่วน deploy ต้องสั่ง Run workflow จาก `main` พร้อม SHA ที่อนุมัติและใช้ `CLOUDFLARE_API_TOKEN` |
 
 ---
 
@@ -104,6 +104,7 @@
 | `docs/STATUS.md` | สถานะงานปัจจุบัน สิ่งที่ทำเสร็จแล้ว งานค้าง และข้อจำกัดของระบบ |
 | `GLOSSARY.md`, `CONTEXT.md` | พจนานุกรมคำศัพท์โดเมนมาตรฐานของโปรเจกต์ |
 | `CODING_STANDARDS.md` | มาตรฐานการเขียนโค้ด การจัดการข้อมูล AI/ค่าลับ และเกณฑ์รีวิว diff |
+| `docs/agent-workflow.md` | วิธีเริ่มงาน เลือกวิธีตรวจตามประเภทงาน และส่งต่องานให้ Agent ตัวถัดไป |
 | `docs/release-workflow.md` | ขั้นตอนการเตรียมงาน รันตรวจ เปิด PR, CI, merge, deploy และตรวจระบบจริง |
 | `docs/releases/` | หลักฐานการ release และข้อจำกัดในการตรวจระบบจริง เช่น `2026-11-15-pr6-natural-question-cards.md` |
 | `docs/adr/` | บันทึกการตัดสินใจทางสถาปัตยกรรม (`0001`, `0002`, และ `0003`) |

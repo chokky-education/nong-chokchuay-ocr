@@ -39,9 +39,11 @@
    ```bash
    ./.venv/bin/python -m py_compile app.py auth_service.py config.py database.py extractor.py line_service.py ocr_service.py storage_service.py watcher.py
    ```
-2. **รันชุดทดสอบอัตโนมัติทั้งหมด (Unit & Integration Tests):**
+2. **รันชุดทดสอบ Python และตรวจ JavaScript:**
    ```bash
    ./.venv/bin/python -m unittest discover -s tests -v
+   node --check worker.js && node --check static/app.js
+   node --test tests/test_worker_js.mjs tests/test_frontend_auth.mjs
    ```
 3. **ตรวจความเรียบร้อยของเอกสารและไฟล์ที่เกี่ยวข้อง:**
    - อัปเดต `docs/STATUS.md` ให้ตรงกับสถานะจริง
@@ -76,15 +78,11 @@
 
 ## 5. การ Merge และการ Deploy (หลังได้รับอนุมัติจากเจ้าของโปรเจกต์)
 
-1. **เมื่อเจ้าของโปรเจกต์อนุมัติให้ merge:**
-   - ทำการ merge PR เข้า `main` และรอให้ workflow `.github/workflows/deploy-cloudflare.yml` บน `main` รันผ่าน
-2. **เมื่อเจ้าของโปรเจกต์อนุมัติให้ deploy (กรณีสั่ง deploy จากเครื่อง):**
-   - สลับไปยัง `main` ที่ดึง commit ล่าสุดแล้ว (`git checkout main && git pull --ff-only`)
-   - หากเป็นการเปิดใช้งาน R2 ครั้งแรก ให้สร้าง private R2 bucket ชื่อ `nong-chokchuay-vault` (ห้ามเปิด Public Access) จากนั้น deploy ชั่วคราวพร้อม `--var R2_BOOTSTRAP_IF_EMPTY:true`, เรียก `GET /api/health` เพื่อสร้าง snapshot แรก แล้ว deploy ซ้ำเพื่อปิดกลับเป็น `R2_BOOTSTRAP_IF_EMPTY:false`
-   - รันคำสั่ง deploy ผ่าน Wrangler:
-     ```bash
-     npx wrangler deploy
-     ```
+1. หลังเจ้าของอนุมัติให้ merge ให้ merge เข้า `main` แล้วรอ job `test` ของ merged SHA ใน workflow `.github/workflows/deploy-cloudflare.yml` ผ่าน การ merge จะรัน CI เท่านั้น
+2. เมื่อถึงรอบ deploy และเจ้าของอนุมัติ ให้เลือกหนึ่งวิธีจาก SHA ที่ตรวจแล้ว
+   - **GitHub Actions** เจ้าของเปิด Actions → **Test & Deploy Nong ChokChuay to Cloudflare** → **Run workflow** เลือกสาขา `main` และกรอก SHA เต็มที่อนุมัติ คำสั่งนี้จะรัน test ก่อน deploy หาก SHA ของรอบนั้นไม่ตรง หรือยังไม่มี `CLOUDFLARE_API_TOKEN` งาน deploy จะหยุดพร้อมแจ้งสาเหตุ
+   - **Wrangler** ดึง `main` ล่าสุด (`git checkout main && git pull --ff-only`) เช็ก SHA ให้ตรงกับรุ่นที่อนุมัติ แล้วรัน `npx wrangler deploy`
+   - หากเป็นการเปิดใช้งาน R2 ครั้งแรก ให้ทำตามขั้นตอน [bootstrap ใน ADR 0003](adr/0003-cloudflare-r2-sqlite-persistence.md#initial-migration-do-identity-transition--rollback-plan) ก่อน deploy แบบปกติ
 3. **การจัดการค่าลับ (Wrangler Secrets):**
    - ต้องมีแผนใน PR ที่ระบุชื่อตัวแปร เป้าหมาย ผลที่คาด วิธีตรวจ และวิธีย้อนกลับ โดยไม่เปิดเผยค่าลับจริง
    - ตั้งค่าผ่าน CLI เฉพาะเมื่อได้รับอนุมัติ:
